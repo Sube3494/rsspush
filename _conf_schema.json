@@ -1,0 +1,126 @@
+{
+  "polling": {
+    "type": "object",
+    "description": "RSS轮询配置",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "是否启用自动轮询",
+        "default": true
+      },
+      "interval": {
+        "type": "int",
+        "description": "轮询间隔（分钟）",
+        "default": 30,
+        "minimum": 5,
+        "maximum": 1440
+      }
+    }
+  },
+  "push": {
+    "type": "object",
+    "description": "推送配置",
+    "items": {
+      "max_items_per_push": {
+        "type": "int",
+        "description": "默认单次推送最大条目数",
+        "default": 1,
+        "minimum": 1,
+        "maximum": 10
+      },
+      "batch_interval": {
+        "type": "int",
+        "description": "批量推送间隔（秒）",
+        "default": 3,
+        "minimum": 1,
+        "maximum": 60
+      },
+      "max_images_per_push": {
+        "type": "int",
+        "description": "单次推送最大图片数（0为不推送图片）",
+        "default": 1,
+        "minimum": 0,
+        "maximum": 9
+      }
+    }
+  },
+  "rsshub": {
+    "type": "object",
+    "description": "RSSHub配置",
+    "items": {
+      "default_instance": {
+        "type": "string",
+        "description": "默认RSSHub实例地址",
+        "default": "https://rsshub.app"
+      }
+    }
+  },
+  "deduplication": {
+    "type": "object",
+    "description": "去重配置",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "是否启用去重",
+        "default": true
+      },
+      "time_window": {
+        "type": "int",
+        "description": "去重时间窗口（天）",
+        "default": 7,
+        "minimum": 1,
+        "maximum": 30
+      }
+    }
+  },
+  "silent_hours": {
+    "type": "object",
+    "description": "静默时段配置",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "是否启用静默时段",
+        "default": false
+      },
+      "start": {
+        "type": "string",
+        "description": "开始时间（HH:MM）",
+        "default": "23:00"
+      },
+      "end": {
+        "type": "string",
+        "description": "结束时间（HH:MM）",
+        "default": "07:00"
+      }
+    }
+  },
+  "rate_limit": {
+    "type": "object",
+    "description": "频率限制配置",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "是否启用频率限制",
+        "default": false
+      },
+      "max_pushes_per_hour": {
+        "type": "int",
+        "description": "每小时最大推送次数",
+        "default": 10,
+        "minimum": 1,
+        "maximum": 100
+      }
+    }
+  },
+  "template": {
+    "type": "object",
+    "description": "消息模板配置",
+    "items": {
+      "default": {
+        "type": "text",
+        "description": "默认消息模板",
+        "default": "🔔 {name}\n\n📰 {title}\n🕐 {pubDate}\n\n📝 {description}\n\n🔗 {link}"
+      }
+    }
+  }
+}

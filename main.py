@@ -20,14 +20,13 @@ class RSSPushPlugin(star.Star):
 
         # 数据目录
         from pathlib import Path
-        data_dir = Path(__file__).parent / "data"
 
-        # 初始化存储和管理器
-        self.storage = Storage(str(data_dir))
-        self.sub_manager = SubscriptionManager(self.storage)
+        self.data_dir = Path(__file__).parent / "data"
 
         # 这些将在 initialize 中初始化
-        self.plugin_config = {}
+        self.plugin_config = None
+        self.storage = None
+        self.sub_manager = None
         self.scheduler = None
         self.fetcher = None
         self.pusher = None
@@ -36,9 +35,20 @@ class RSSPushPlugin(star.Star):
         """插件初始化"""
         logger.info("RSS推送插件初始化...")
 
-        # 获取插件配置（用于全局设置）
+        # 获取插件配置（此时配置对象已准备好）
         plugin_metadata = self.context.get_registered_star("rsspush")
         self.plugin_config = plugin_metadata.config if plugin_metadata else {}
+
+        if self.plugin_config:
+            logger.info(f"✅ 配置对象类型: {type(self.plugin_config).__name__}")
+            logger.info(
+                f"✅ 配置有 save_config: {hasattr(self.plugin_config, 'save_config')}"
+            )
+
+        # 初始化存储和订阅管理器
+        self.storage = Storage(str(self.data_dir))
+        self.sub_manager = SubscriptionManager(self.storage, self.plugin_config)
+        self.sub_manager.initialize()  # 加载订阅
 
         logger.info(f"当前订阅数: {len(self.sub_manager.list_all())}")
 

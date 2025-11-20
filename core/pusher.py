@@ -88,13 +88,12 @@ class Pusher:
         # 获取配置
         push_config = self.config.get("push", {})
         max_len = push_config.get("max_length", 200)
-        show_images = push_config.get("show_images", True)
-        
+
         # 准备数据
         title = item.get("title", "").strip()
         link = item.get("link", "")
         author = item.get("author", "")
-        
+
         # 处理时间
         pub_date_str = ""
         if item.get("pubDate") and isinstance(item["pubDate"], datetime):
@@ -102,7 +101,7 @@ class Pusher:
 
         # 处理描述
         desc = item.get("description", "").strip()
-        
+
         # 如果描述以标题开头，去掉标题部分避免重复
         if desc and title and desc.startswith(title):
             desc = desc[len(title) :].strip()
@@ -113,7 +112,9 @@ class Pusher:
         # 智能截断
         if desc:
             # 移除多余空行
-            desc = "\n".join([line.strip() for line in desc.splitlines() if line.strip()])
+            desc = "\n".join(
+                [line.strip() for line in desc.splitlines() if line.strip()]
+            )
             if len(desc) > max_len:
                 desc = desc[:max_len] + "..."
         else:
@@ -126,13 +127,13 @@ class Pusher:
         msg += f"📰 {title}\n"
         msg += "═══════════════\n"
         msg += f"{desc}\n\n"
-        
+
         if pub_date_str:
             msg += f"⏱️ {pub_date_str}\n"
-        
+
         if author:
             msg += f"👤 {author}\n"
-            
+
         msg += f"🔗 {link}"
 
         return msg

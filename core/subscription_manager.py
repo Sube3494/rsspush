@@ -9,123 +9,19 @@ from .subscription import Subscription, Target
 class SubscriptionManager:
     """订阅管理器"""
 
-    def __init__(self, storage: Storage, plugin_config=None):
+    def __init__(self, storage: Storage):
         self.storage = storage
-        self.plugin_config = plugin_config
         self.subscriptions: list[Subscription] = []
-        # 不在这里加载，等待 plugin_config 准备好
-
-    def initialize(self):
-        """初始化并加载订阅（在 plugin_config 准备好后调用）"""
         self.load()
 
     def load(self):
-        """加载订阅（从配置系统）"""
-        if not self.plugin_config:
-            logger.warning("配置对象未准备好，从旧存储加载")
-            self.subscriptions = self.storage.load_subscriptions()
-            return
-
-        # 从配置系统加载
-        config_subs = self.plugin_config.get("subscriptions", [])
-
-        if config_subs:
-            self.subscriptions = []
-            for config_sub in config_subs:
-                try:
-                    sub = self._config_to_subscription(config_sub)
-                    self.subscriptions.append(sub)
-                except Exception as e:
-                    logger.error(f"加载订阅失败: {e}")
-            logger.info(f"✅ 从配置系统加载了 {len(self.subscriptions)} 个订阅")
-        else:
-            # 迁移旧数据
-            legacy_subs = self.storage.load_subscriptions()
-            if legacy_subs:
-                self.subscriptions = legacy_subs
-                logger.info(f"🔄 检测到旧数据，自动迁移 {len(legacy_subs)} 个订阅")
-                self.save()  # 立即保存到配置系统
-            else:
-                self.subscriptions = []
-                logger.info("没有找到订阅")
+        """加载订阅"""
+        self.subscriptions = self.storage.load_subscriptions()
+        logger.info(f"订阅管理器加载了 {len(self.subscriptions)} 个订阅")
 
     def save(self):
-        """保存订阅（到配置系统）"""
-        if not self.plugin_config:
-            logger.warning("配置对象未准备好，保存到旧存储")
-            self.storage.save_subscriptions(self.subscriptions)
-            return
-
-        # 转换为配置格式
-        config_subs = []
-        for sub in self.subscriptions:
-            config_sub = self._subscription_to_config(sub)
-            config_subs.append(config_sub)
-
-        # 更新配置
-        self.plugin_config["subscriptions"] = config_subs
-
-        # 保存配置文件
-        if hasattr(self.plugin_config, "save_config"):
-            self.plugin_config.save_config()
-            logger.info(f"✅ 已保存 {len(self.subscriptions)} 个订阅到配置系统")
-        else:
-            logger.error("配置对象没有 save_config 方法")
-
-    def _config_to_subscription(self, config: dict) -> Subscription:
-        """从配置格式转换为订阅对象"""
-        from datetime import datetime
-
-        # 解析targets
-        targets = []
-        for t_data in config.get("targets", []):
-            target = Target.from_dict(t_data)
-            targets.append(target)
-
-        # 创建订阅
-        sub = Subscription(
-            id=config.get("id"),
-            name=config.get("name", ""),
-            url=config.get("url", ""),
-            enabled=config.get("enabled", True),
-            targets=targets,
-            template=config.get("custom_template"),
-            max_items=config.get("max_items", 1),
-        )
-
-        # 恢复时间戳
-        if config.get("created_at"):
-            try:
-                sub.created_at = datetime.fromisoformat(config["created_at"])
-            except Exception:
-                pass
-        if config.get("last_check"):
-            try:
-                sub.last_check = datetime.fromisoformat(config["last_check"])
-            except Exception:
-                pass
-        if config.get("last_push"):
-            try:
-                sub.last_push = datetime.fromisoformat(config["last_push"])
-            except Exception:
-                pass
-
-        return sub
-
-    def _subscription_to_config(self, sub: Subscription) -> dict:
-        """从订阅对象转换为配置格式"""
-        return {
-            "id": sub.id,
-            "name": sub.name,
-            "url": sub.url,
-            "enabled": sub.enabled,
-            "max_items": sub.max_items,
-            "custom_template": sub.template or "",
-            "targets": [t.to_dict() for t in sub.targets],
-            "created_at": sub.created_at.isoformat() if sub.created_at else None,
-            "last_check": sub.last_check.isoformat() if sub.last_check else None,
-            "last_push": sub.last_push.isoformat() if sub.last_push else None,
-        }
+        """保存订阅"""
+        self.storage.save_subscriptions(self.subscriptions)
 
     def add(self, name: str, url: str, targets: list[Target]) -> Subscription:
         """添加订阅

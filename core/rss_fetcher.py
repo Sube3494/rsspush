@@ -29,10 +29,9 @@ class RSSFetcher:
             async with self.session.get(url) as response:
                 if response.status == 200:
                     content = await response.text()
-
+                    
                     # 在线程池中运行解析，避免阻塞事件循环
                     import asyncio
-
                     loop = asyncio.get_event_loop()
                     feed = await loop.run_in_executor(None, feedparser.parse, content)
 

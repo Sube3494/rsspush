@@ -87,11 +87,8 @@ class RSSScheduler:
 
             # 解析条目 (在线程池中运行)
             import asyncio
-
             loop = asyncio.get_event_loop()
-            entries = await loop.run_in_executor(
-                None, self.parser.parse_entries, feed_data
-            )
+            entries = await loop.run_in_executor(None, self.parser.parse_entries, feed_data)
 
             if not entries:
                 logger.info(f"订阅无新内容: {sub.name}")

@@ -104,6 +104,33 @@ class Storage:
         except Exception as e:
             logger.error(f"标记推送状态失败: {e}")
 
+    def get_last_pushed_guid(self, sub_id: str) -> str | None:
+        """获取订阅最后推送的条目的GUID
+        
+        Args:
+            sub_id: 订阅ID
+            
+        Returns:
+            最后推送的条目的GUID，如果没有则返回None
+        """
+        try:
+            conn = sqlite3.connect(str(self.db_file))
+            cursor = conn.cursor()
+            # 获取最后推送的记录（按pushed_at排序）
+            cursor.execute(
+                "SELECT guid FROM pushed_items WHERE subscription_id = ? ORDER BY pushed_at DESC LIMIT 1",
+                (sub_id,),
+            )
+            result = cursor.fetchone()
+            conn.close()
+            
+            if result:
+                return result[0]
+            return None
+        except Exception as e:
+            logger.error(f"获取最后推送GUID失败: {e}")
+            return None
+
     def cleanup_old_records(self, days: int = 7):
         """清理旧记录"""
         try:

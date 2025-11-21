@@ -98,72 +98,109 @@ class RSSScheduler:
 
             logger.info(f"解析到 {len(entries)} 个条目: {sub.name}")
 
-            # 先按发布时间排序（最新的优先，用于后续处理）
+            # 按发布时间排序（最新的在前）
             entries.sort(
                 key=lambda x: x["pubDate"] if x.get("pubDate") else datetime.min,
-                reverse=True,
+                reverse=True,  # 最新的在前
             )
 
-            # 过滤已推送的条目
-            new_entries = []
+            # 获取最后推送的条目GUID（用于检测漏推）
+            last_pushed_guid = self.storage.get_last_pushed_guid(sub.id)
+            
+            # 找出最后推送的条目在feed中的位置
+            last_pushed_entry_time = None
+            if last_pushed_guid:
+                for entry in entries:
+                    if entry.get("guid") == last_pushed_guid:
+                        last_pushed_entry_time = entry.get("pubDate")
+                        break
+            
+            # 过滤已推送的条目，并找出最新的一条和漏推的条目
+            latest_entry = None
+            missed_entries = []
             pushed_count = 0
+            
+            # 先找出所有未推送的条目
+            unpushed_entries = []
             for entry in entries:
                 guid = entry.get("guid", "")
                 if not guid:
                     logger.warning(f"条目缺少GUID，跳过: {entry.get('title', 'Unknown')[:50]}")
                     continue
-                    
-                if not self.storage.is_pushed(guid, sub.id):
-                    new_entries.append(entry)
-                else:
+                
+                # 检查是否已推送
+                if self.storage.is_pushed(guid, sub.id):
                     pushed_count += 1
-
-            logger.info(
-                f"条目统计: 总计 {len(entries)} 条, "
-                f"已推送 {pushed_count} 条, "
-                f"新条目 {len(new_entries)} 条"
-            )
-
-            if not new_entries:
+                    continue
+                
+                entry_time = entry.get("pubDate")
+                if not entry_time:
+                    # 没有时间的条目，跳过
+                    continue
+                
+                unpushed_entries.append(entry)
+            
+            if not unpushed_entries:
                 logger.info(f"没有新内容需要推送: {sub.name}")
                 sub.stats.success_checks += 1
                 self.sub_manager.update_subscription(sub)
                 return
-
-            # 按时间从旧到新排序，确保按顺序推送（避免服务中断后漏掉中间的条目）
-            new_entries.sort(
-                key=lambda x: x["pubDate"] if x.get("pubDate") else datetime.min,
-                reverse=False,  # 从旧到新
+            
+            # 最新的一条就是第一条未推送的（因为已经按时间排序，最新的在前）
+            latest_entry = unpushed_entries[0]
+            
+            # 如果有最后推送的条目时间，找出漏推的条目
+            # 漏推的条目：发布时间在最后推送条目时间之后，但不是最新的一条
+            if last_pushed_entry_time and len(unpushed_entries) > 1:
+                for entry in unpushed_entries[1:]:  # 跳过最新的一条
+                    entry_time = entry.get("pubDate")
+                    if entry_time and entry_time > last_pushed_entry_time:
+                        missed_entries.append(entry)
+            
+            logger.info(
+                f"条目统计: 总计 {len(entries)} 条, "
+                f"已推送 {pushed_count} 条, "
+                f"最新未推送: 1 条, "
+                f"漏推: {len(missed_entries)} 条"
             )
 
-            # 智能推送策略：
-            # 1. 如果有多个未推送的条目（可能服务中断了），限制推送数量避免刷屏
-            # 2. 如果只有一个未推送的条目，按配置的 max_items 限制推送
-            max_items = sub.max_items or 1
+            # 确定要推送的条目
+            to_push = []
             
-            # 限制单次推送的最大条目数，避免一次性推送太多
-            # 如果检测到大量未推送条目，可能是数据库问题或服务长时间中断
-            max_push_limit = min(10, max_items * 3)  # 最多推送10条或max_items的3倍
+            # 如果有漏推的条目，先推送漏推的（按时间从旧到新），再推送最新的
+            if missed_entries:
+                # 漏推的条目按时间从旧到新排序
+                missed_entries.sort(
+                    key=lambda x: x.get("pubDate") or datetime.min,
+                    reverse=False,
+                )
+                to_push.extend(missed_entries)
+                logger.info(
+                    f"检测到 {len(missed_entries)} 个漏推条目（服务中断期间），"
+                    f"将补推这些条目"
+                )
             
-            if len(new_entries) > max_push_limit:
-                # 检测到大量未推送条目，可能是数据库问题，只推送最新的几条
+            # 添加最新的一条
+            to_push.append(latest_entry)
+            
+            # 限制推送数量，避免一次性推送太多（最多20条）
+            max_push_limit = 20
+            if len(to_push) > max_push_limit:
                 logger.warning(
-                    f"检测到 {len(new_entries)} 个未推送条目（可能异常），"
+                    f"推送条目过多 ({len(to_push)} 条)，"
                     f"将只推送最新的 {max_push_limit} 条以避免刷屏"
                 )
-                # 取最新的几条（因为已经按时间从旧到新排序，所以取最后几条）
-                to_push = new_entries[-max_push_limit:]
-            elif len(new_entries) > 1:
-                # 检测到少量未推送条目，可能是服务短暂中断，推送所有
-                logger.info(
-                    f"检测到 {len(new_entries)} 个未推送条目，将按时间顺序推送所有条目"
-                )
-                to_push = new_entries
-            else:
-                # 只有一个未推送条目，按配置的 max_items 限制推送
-                to_push = new_entries[:max_items]
+                # 保留漏推的最新几条 + 最新的一条
+                if len(missed_entries) >= max_push_limit:
+                    to_push = missed_entries[-max_push_limit+1:] + [latest_entry]
+                else:
+                    to_push = missed_entries + [latest_entry]
+                    to_push = to_push[-max_push_limit:]
 
-            logger.info(f"准备推送 {len(to_push)} 个条目: {sub.name}")
+            logger.info(
+                f"准备推送 {len(to_push)} 个条目: "
+                f"{len(missed_entries) if missed_entries else 0} 个漏推 + 1 个最新"
+            )
 
             # 推送
             await self.pusher.push(sub, to_push)

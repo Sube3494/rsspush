@@ -189,22 +189,79 @@ class Pusher:
             # 如果没有描述，使用替代文本
             desc = "📷 包含图片" if item.get("images") else "点击链接查看详情"
 
-        # 构建消息 (使用默认模板，暂不支持自定义模板以保证样式统一，后续可加回)
-        msg = f"📢 {sub.name}\n"
-        msg += "═══════════════\n"
-        msg += f"📰 {title}\n"
-        msg += "═══════════════\n"
-        msg += f"{desc}\n\n"
+        # 构建消息（优化格式和排版，去除不必要的空格和换行）
+        msg_parts = []
         
-        if pub_date_str:
-            msg += f"⏱️ {pub_date_str}\n"
+        # 订阅名称（顶部，带分隔线）
+        separator_length = min(len(sub.name) + 4, 50)
+        msg_parts.append(f"📢 {sub.name}")
+        msg_parts.append("─" * separator_length)
         
+        # 作者
         if author:
-            msg += f"👤 {author}\n"
+            author = author.strip()
+            msg_parts.append(f"👤 {author}")
+        
+        # 标题
+        title = title.strip()
+        if title:
+            msg_parts.append(f"📰 {title}")
+        
+        # 描述内容
+        if desc:
+            # 清理描述：去除多余空格和空行
+            desc = desc.strip()
+            # 将多个连续空格替换为单个空格
+            import re
+            desc = re.sub(r' +', ' ', desc)
+            # 将多个连续换行替换为单个换行
+            desc = re.sub(r'\n+', '\n', desc)
             
-        msg += f"🔗 {link}"
-
-        return msg
+            # 智能换行：如果描述较长，在合适的位置换行
+            if len(desc) > 120:
+                desc_lines = []
+                current_line = ""
+                for char in desc:
+                    current_line += char
+                    # 在句号、问号、感叹号处换行
+                    if char in ["。", "！", "？", ".", "!", "?"] and len(current_line.strip()) > 60:
+                        if current_line.strip():
+                            desc_lines.append(current_line.strip())
+                        current_line = ""
+                if current_line.strip():
+                    desc_lines.append(current_line.strip())
+                desc = "\n".join(desc_lines) if desc_lines else desc
+            
+            # 添加描述，第一行带emoji，后续行对齐到文字内容
+            desc_lines = [line.strip() for line in desc.split("\n") if line.strip()]
+            if desc_lines:
+                # 第一行带emoji
+                first_line = f"📝 {desc_lines[0]}"
+                # 计算对齐所需的空格数（emoji + 空格的长度）
+                indent = " " * (len("📝 ") + len(desc_lines[0]) - len(desc_lines[0].lstrip()))
+                # 后续行对齐到第一行文字内容的起始位置
+                indent_length = len("📝 ")
+                other_lines = [f"{' ' * indent_length}{line}" for line in desc_lines[1:]]
+                # 组合所有行
+                formatted_desc = "\n".join([first_line] + other_lines)
+                msg_parts.append(formatted_desc)
+        
+        # 元信息（时间）- 紧凑显示
+        if pub_date_str:
+            msg_parts.append(f"⏱️ {pub_date_str.strip()}")
+        
+        # 链接（底部）
+        if link:
+            link = link.strip()
+            msg_parts.append(f"🔗 {link}")
+        
+        # 组合消息，去除空行和多余空格
+        msg = "\n".join([part for part in msg_parts if part.strip()])
+        # 清理连续的空行（最多保留一个）
+        while "\n\n\n" in msg:
+            msg = msg.replace("\n\n\n", "\n\n")
+        
+        return msg.strip()
 
     async def _send_to_target(
         self, target: Target, message: str, images: list[str] = []

@@ -46,9 +46,27 @@ class RSSParser:
     @staticmethod
     def _extract_guid(entry: dict) -> str:
         """提取条目唯一标识"""
-        # 优先使用id，其次使用link
-        guid = entry.get("id") or entry.get("guid") or entry.get("link", "")
-        return str(guid)
+        from urllib.parse import urlparse, urlunparse
+        
+        # 优先使用id，其次使用guid
+        guid = entry.get("id") or entry.get("guid")
+        if guid:
+            return str(guid)
+        
+        # 如果都没有，使用link，但要去除查询参数确保一致性
+        link = entry.get("link", "")
+        if link:
+            try:
+                # 解析URL并去除查询参数和片段
+                parsed = urlparse(link)
+                # 重新构建URL，只保留 scheme, netloc, path
+                clean_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+                return clean_url
+            except Exception:
+                # 如果解析失败，返回原始link
+                return str(link)
+        
+        return ""
 
     @staticmethod
     def _extract_description(entry: dict) -> str:

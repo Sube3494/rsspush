@@ -65,6 +65,10 @@ class Storage:
 
     def is_pushed(self, guid: str, sub_id: str) -> bool:
         """检查是否已推送"""
+        if not guid or not sub_id:
+            logger.warning(f"GUID或订阅ID为空: guid={guid}, sub_id={sub_id}")
+            return False
+            
         try:
             conn = sqlite3.connect(str(self.db_file))
             cursor = conn.cursor()
@@ -74,9 +78,16 @@ class Storage:
             )
             result = cursor.fetchone()
             conn.close()
-            return result is not None
+            is_pushed = result is not None
+            if is_pushed:
+                logger.debug(f"条目已推送: guid={guid[:50]}..., sub_id={sub_id[:8]}...")
+            return is_pushed
+        except sqlite3.Error as e:
+            logger.error(f"数据库查询失败 (guid={guid[:50]}..., sub_id={sub_id[:8]}...): {e}")
+            # 数据库错误时返回False，但记录详细错误以便排查
+            return False
         except Exception as e:
-            logger.error(f"检查推送状态失败: {e}")
+            logger.error(f"检查推送状态失败 (guid={guid[:50]}..., sub_id={sub_id[:8]}...): {e}", exc_info=True)
             return False
 
     def mark_pushed(self, guid: str, sub_id: str, targets: list[str]):

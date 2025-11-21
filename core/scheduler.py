@@ -106,12 +106,23 @@ class RSSScheduler:
 
             # 过滤已推送的条目
             new_entries = []
+            pushed_count = 0
             for entry in entries:
-                guid = entry["guid"]
+                guid = entry.get("guid", "")
+                if not guid:
+                    logger.warning(f"条目缺少GUID，跳过: {entry.get('title', 'Unknown')[:50]}")
+                    continue
+                    
                 if not self.storage.is_pushed(guid, sub.id):
                     new_entries.append(entry)
+                else:
+                    pushed_count += 1
 
-            logger.info(f"新条目数: {len(new_entries)} / {len(entries)}")
+            logger.info(
+                f"条目统计: 总计 {len(entries)} 条, "
+                f"已推送 {pushed_count} 条, "
+                f"新条目 {len(new_entries)} 条"
+            )
 
             if not new_entries:
                 logger.info(f"没有新内容需要推送: {sub.name}")
@@ -126,17 +137,28 @@ class RSSScheduler:
             )
 
             # 智能推送策略：
-            # 1. 如果有多个未推送的条目（可能服务中断了），推送所有未推送的条目（限制上限）
+            # 1. 如果有多个未推送的条目（可能服务中断了），限制推送数量避免刷屏
             # 2. 如果只有一个未推送的条目，按配置的 max_items 限制推送
             max_items = sub.max_items or 1
-            if len(new_entries) > 1:
-                # 检测到多个未推送条目，可能是服务中断导致的，推送所有未推送的条目
-                # 但限制上限为50条，避免一次性推送太多历史内容
-                max_push_limit = 50
-                to_push = new_entries[:max_push_limit]
-                logger.info(
-                    f"检测到 {len(new_entries)} 个未推送条目，将按时间顺序推送所有条目（最多{max_push_limit}条）"
+            
+            # 限制单次推送的最大条目数，避免一次性推送太多
+            # 如果检测到大量未推送条目，可能是数据库问题或服务长时间中断
+            max_push_limit = min(10, max_items * 3)  # 最多推送10条或max_items的3倍
+            
+            if len(new_entries) > max_push_limit:
+                # 检测到大量未推送条目，可能是数据库问题，只推送最新的几条
+                logger.warning(
+                    f"检测到 {len(new_entries)} 个未推送条目（可能异常），"
+                    f"将只推送最新的 {max_push_limit} 条以避免刷屏"
                 )
+                # 取最新的几条（因为已经按时间从旧到新排序，所以取最后几条）
+                to_push = new_entries[-max_push_limit:]
+            elif len(new_entries) > 1:
+                # 检测到少量未推送条目，可能是服务短暂中断，推送所有
+                logger.info(
+                    f"检测到 {len(new_entries)} 个未推送条目，将按时间顺序推送所有条目"
+                )
+                to_push = new_entries
             else:
                 # 只有一个未推送条目，按配置的 max_items 限制推送
                 to_push = new_entries[:max_items]

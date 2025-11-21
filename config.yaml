@@ -8,6 +8,8 @@ polling:
 push:
   max_items_per_push: 1  # 单次推送最大条目数
   batch_interval: 3      # 批量推送间隔（秒）
+  concurrent_items: 3   # 并发推送的条目数（同时推送多个条目，提高速度）
+  concurrent_targets: 5 # 每个条目的并发目标数（同时推送到多个目标）
   
 deduplication:
   enabled: true

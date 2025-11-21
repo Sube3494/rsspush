@@ -26,7 +26,7 @@ class Pusher:
         )
 
     async def push(self, sub: Subscription, items: list[dict]):
-        """推送内容到目标
+        """推送内容到目标（支持并发推送）
 
         Args:
             sub: 订阅对象
@@ -35,45 +35,114 @@ class Pusher:
         if not items:
             return
 
-        # 获取批量推送间隔
-        batch_interval = self.config.get("push", {}).get("batch_interval", 3)
-        # 获取最大图片数
-        max_images = self.config.get("push", {}).get("max_images_per_push", 1)
-        logger.info(f"📊 配置: 批量间隔={batch_interval}秒, 最大图片数={max_images}")
+        # 获取配置
+        push_config = self.config.get("push", {})
+        batch_interval = push_config.get("batch_interval", 3)
+        max_images = push_config.get("max_images_per_push", 1)
+        # 并发配置：同时推送的条目数，默认3个
+        concurrent_items = push_config.get("concurrent_items", 3)
+        # 每个条目的目标并发数，默认5个
+        concurrent_targets = push_config.get("concurrent_targets", 5)
+        
+        logger.info(
+            f"📊 推送配置: 条目数={len(items)}, "
+            f"并发条目数={concurrent_items}, "
+            f"并发目标数={concurrent_targets}, "
+            f"批量间隔={batch_interval}秒, "
+            f"最大图片数={max_images}"
+        )
 
-        # 推送每个条目
-        for i, item in enumerate(items):
-            try:
-                message = self._format_message(sub, item)
+        # 使用信号量控制并发数
+        items_semaphore = asyncio.Semaphore(concurrent_items)
+        targets_semaphore = asyncio.Semaphore(concurrent_targets)
 
-                # 提取图片URL
-                all_images = item.get("images", [])
-                logger.info(f"🖼️ RSS条目包含 {len(all_images)} 张图片")
+        async def push_single_item(item: dict, index: int):
+            """推送单个条目"""
+            async with items_semaphore:
+                try:
+                    message = self._format_message(sub, item)
 
-                images = all_images[:max_images] if max_images > 0 else []
-                if images:
-                    logger.info(f"🖼️ 准备推送 {len(images)} 张图片 (限制: {max_images})")
-                    for idx, img_url in enumerate(images, 1):
-                        logger.debug(f"  图片{idx}: {img_url[:80]}...")
+                    # 提取图片URL
+                    all_images = item.get("images", [])
+                    if all_images:
+                        logger.debug(f"🖼️ 条目[{index+1}]包含 {len(all_images)} 张图片")
 
-                # 推送到所有目标
-                for target in sub.targets:
-                    await self._send_to_target(target, message, images)
+                    images = all_images[:max_images] if max_images > 0 else []
 
-                # 更新统计
-                sub.stats.total_pushes += 1
-                sub.stats.success_pushes += 1
-                sub.last_push = datetime.now()
+                    # 并发推送到所有目标
+                    target_tasks = []
+                    for target in sub.targets:
+                        task = self._send_to_target_with_semaphore(
+                            target, message, images, targets_semaphore
+                        )
+                        target_tasks.append(task)
 
-                logger.info(f"推送成功: {sub.name} - {item['title'][:30]}")
+                    # 等待所有目标推送完成
+                    results = await asyncio.gather(*target_tasks, return_exceptions=True)
+                    
+                    # 检查是否有失败
+                    failed_count = sum(1 for r in results if isinstance(r, Exception))
+                    success_count = len(results) - failed_count
 
-                # 批量推送时添加间隔
-                if i < len(items) - 1:
-                    await asyncio.sleep(batch_interval)
+                    if failed_count > 0:
+                        logger.warning(
+                            f"条目[{index+1}]推送部分失败: "
+                            f"成功 {success_count}/{len(results)} 个目标"
+                        )
+                        # 如果所有目标都失败，才记录为失败
+                        if success_count == 0:
+                            raise Exception(f"所有目标推送失败")
+                    else:
+                        logger.info(
+                            f"✅ 条目[{index+1}]推送成功: "
+                            f"{item['title'][:30]}... ({success_count}个目标)"
+                        )
 
-            except Exception as e:
-                logger.error(f"推送失败: {sub.name} - {e}")
-                sub.stats.last_error = str(e)
+                    # 更新统计
+                    sub.stats.total_pushes += 1
+                    if success_count > 0:
+                        sub.stats.success_pushes += 1
+                    sub.last_push = datetime.now()
+
+                    # 如果不是最后一个条目，添加间隔（避免API限流）
+                    if index < len(items) - 1:
+                        await asyncio.sleep(batch_interval)
+
+                except Exception as e:
+                    logger.error(f"❌ 推送条目[{index+1}]失败: {sub.name} - {e}")
+                    sub.stats.last_error = str(e)
+                    raise
+
+        # 并发推送所有条目
+        tasks = [
+            push_single_item(item, i) for i, item in enumerate(items)
+        ]
+        
+        # 等待所有推送完成
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # 统计结果
+        success_count = sum(1 for r in results if not isinstance(r, Exception))
+        failed_count = len(results) - success_count
+        
+        if failed_count > 0:
+            logger.warning(
+                f"推送完成: 成功 {success_count}/{len(items)} 个条目, "
+                f"失败 {failed_count} 个条目"
+            )
+        else:
+            logger.info(f"✅ 所有 {len(items)} 个条目推送完成")
+
+    async def _send_to_target_with_semaphore(
+        self,
+        target: Target,
+        message: str,
+        images: list[str],
+        semaphore: asyncio.Semaphore,
+    ):
+        """带信号量控制的发送消息到目标"""
+        async with semaphore:
+            return await self._send_to_target(target, message, images)
 
     def _format_message(self, sub: Subscription, item: dict) -> str:
         """格式化消息（优化版）

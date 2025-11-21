@@ -1,5 +1,8 @@
 """RSS推送插件主入口"""
 
+import json
+import os
+
 from astrbot.api import logger, star
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context
@@ -36,23 +39,50 @@ class RSSPushPlugin(star.Star):
         """插件初始化"""
         logger.info("RSS推送插件初始化...")
 
+        # 如果调度器已存在，先停止它（配置更新时可能需要重启）
+        if self.scheduler:
+            logger.info("检测到已有调度器，正在停止...")
+            self.scheduler.stop()
+            self.scheduler = None
+
         # 获取插件配置（用于全局设置）
-        plugin_metadata = self.context.get_registered_star("rsspush")
-        self.plugin_config = plugin_metadata.config if plugin_metadata else {}
+        # 直接从配置文件读取，确保使用最新配置
+        from pathlib import Path
+        plugin_dir = Path(__file__).parent
+        # WebUI 保存的配置文件路径：data/config/rsspush_config.json
+        # 从 data/plugins/rsspush/ 到 data/config/
+        config_file = plugin_dir.parent.parent / "config" / "rsspush_config.json"
+        
+        try:
+            if config_file.exists():
+                # 使用 utf-8-sig 编码读取，支持 UTF-8 BOM
+                with open(config_file, encoding="utf-8-sig") as f:
+                    self.plugin_config = json.load(f)
+                logger.info(f"已从配置文件加载配置: {config_file}")
+            else:
+                logger.warning(f"配置文件不存在: {config_file}，使用默认配置")
+                self.plugin_config = {}
+        except Exception as e:
+            logger.error(f"加载配置文件失败: {e}")
+            self.plugin_config = {}
 
         logger.info(f"当前订阅数: {len(self.sub_manager.list_all())}")
 
-        # 初始化RSS获取器
+        # 初始化RSS获取器（如果已存在则关闭旧的）
+        if self.fetcher:
+            await self.fetcher.close()
         self.fetcher = RSSFetcher()
 
         # 初始化推送器（传入配置）
         self.pusher = Pusher(self.context, self.plugin_config)
 
         # 初始化调度器
-        # 从配置文件读取
+        # 从配置文件读取轮询配置
         polling_config = self.plugin_config.get("polling", {})
         polling_enabled = polling_config.get("enabled", True)
         polling_interval = polling_config.get("interval", 30)
+        
+        logger.info(f"读取配置: 轮询启用={polling_enabled}, 轮询间隔={polling_interval} 分钟")
 
         if polling_enabled:
             self.scheduler = RSSScheduler(

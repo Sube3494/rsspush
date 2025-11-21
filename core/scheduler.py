@@ -98,23 +98,11 @@ class RSSScheduler:
 
             logger.info(f"解析到 {len(entries)} 个条目: {sub.name}")
 
-            # 先按发布时间排序（最新的优先）
+            # 先按发布时间排序（最新的优先，用于后续处理）
             entries.sort(
                 key=lambda x: x["pubDate"] if x.get("pubDate") else datetime.min,
                 reverse=True,
             )
-
-            # 只检查最新的内容
-            if entries:
-                latest_entry = entries[0]
-                latest_guid = latest_entry["guid"]
-
-                # 如果最新的已经推送过，说明没有新内容
-                if self.storage.is_pushed(latest_guid, sub.id):
-                    logger.info(f"最新内容已推送，跳过: {sub.name}")
-                    sub.stats.success_checks += 1
-                    self.sub_manager.update_subscription(sub)
-                    return
 
             # 过滤已推送的条目
             new_entries = []
@@ -131,9 +119,27 @@ class RSSScheduler:
                 self.sub_manager.update_subscription(sub)
                 return
 
-            # 限制推送数量（已经是按时间排序的）
+            # 按时间从旧到新排序，确保按顺序推送（避免服务中断后漏掉中间的条目）
+            new_entries.sort(
+                key=lambda x: x["pubDate"] if x.get("pubDate") else datetime.min,
+                reverse=False,  # 从旧到新
+            )
+
+            # 智能推送策略：
+            # 1. 如果有多个未推送的条目（可能服务中断了），推送所有未推送的条目（限制上限）
+            # 2. 如果只有一个未推送的条目，按配置的 max_items 限制推送
             max_items = sub.max_items or 1
-            to_push = new_entries[:max_items]
+            if len(new_entries) > 1:
+                # 检测到多个未推送条目，可能是服务中断导致的，推送所有未推送的条目
+                # 但限制上限为50条，避免一次性推送太多历史内容
+                max_push_limit = 50
+                to_push = new_entries[:max_push_limit]
+                logger.info(
+                    f"检测到 {len(new_entries)} 个未推送条目，将按时间顺序推送所有条目（最多{max_push_limit}条）"
+                )
+            else:
+                # 只有一个未推送条目，按配置的 max_items 限制推送
+                to_push = new_entries[:max_items]
 
             logger.info(f"准备推送 {len(to_push)} 个条目: {sub.name}")
 

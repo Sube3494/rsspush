@@ -104,21 +104,13 @@ class RSSScheduler:
                 reverse=True,  # 最新的在前
             )
 
-            # 获取最后推送的条目GUID，并找出其发布时间
-            last_pushed_guid = self.storage.get_last_pushed_guid(sub.id)
-            last_pushed_entry_time = None
+            # 直接从数据库获取最后推送动态的发布时间
+            last_pushed_pub_date = self.storage.get_last_pushed_pub_date(sub.id)
             
-            if last_pushed_guid:
-                # 在feed中找到最后推送的条目，获取其发布时间
-                for entry in entries:
-                    if entry.get("guid") == last_pushed_guid:
-                        last_pushed_entry_time = entry.get("pubDate")
-                        break
-            
-            # 找出所有比最后推送条目时间新的条目
-            # 只推送比已推送内容更新的内容
+            # 筛选需要推送的条目
             newer_entries = []
             pushed_count = 0
+            no_date_count = 0
             
             for entry in entries:
                 guid = entry.get("guid", "")
@@ -128,7 +120,8 @@ class RSSScheduler:
                 
                 entry_time = entry.get("pubDate")
                 if not entry_time:
-                    # 没有时间的条目，跳过
+                    # 没有时间的条目，跳过（无法判断顺序）
+                    no_date_count += 1
                     continue
                 
                 # 检查是否已推送
@@ -136,20 +129,20 @@ class RSSScheduler:
                     pushed_count += 1
                     continue
                 
-                # 如果没有最后推送时间，说明是第一次推送，只推送最新的一条
-                if last_pushed_entry_time is None:
-                    # 第一次推送，只推送最新的一条
+                # 第一次推送：只推送最新的一条
+                if last_pushed_pub_date is None:
                     newer_entries.append(entry)
                     break  # 只取第一条（最新的）
                 
-                # 只推送比最后推送条目时间新的条目
-                if entry_time > last_pushed_entry_time:
+                # 推送所有比最后推送时间新的条目
+                if entry_time > last_pushed_pub_date:
                     newer_entries.append(entry)
             
             logger.info(
                 f"条目统计: 总计 {len(entries)} 条, "
                 f"已推送 {pushed_count} 条, "
-                f"比最后推送时间新的条目: {len(newer_entries)} 条"
+                f"无时间 {no_date_count} 条, "
+                f"待推送 {len(newer_entries)} 条"
             )
             
             if not newer_entries:
@@ -198,10 +191,15 @@ class RSSScheduler:
             # 推送
             await self.pusher.push(sub, to_push)
 
-            # 标记为已推送
+            # 标记为已推送（传递发布时间）
             target_ids = [t.id for t in sub.targets]
             for entry in to_push:
-                self.storage.mark_pushed(entry["guid"], sub.id, target_ids)
+                self.storage.mark_pushed(
+                    entry["guid"], 
+                    sub.id, 
+                    target_ids,
+                    entry.get("pubDate")  # 传递动态的发布时间
+                )
 
             # 更新统计
             sub.stats.success_checks += 1

@@ -101,13 +101,13 @@ class RSSParser:
 
     @staticmethod
     def _parse_date(entry: dict) -> datetime | None:
-        """解析发布日期
+        """解析发布日期并转换为本地时间
 
         Args:
             entry: RSS条目
 
         Returns:
-            解析后的日期，失败返回None
+            解析后的日期（本地时间），失败返回None
         """
         # 尝试多个日期字段
         date_str = (
@@ -116,7 +116,19 @@ class RSSParser:
 
         if date_str:
             try:
-                return date_parser.parse(date_str)
+                from dateutil import tz
+                
+                # 解析日期
+                dt = date_parser.parse(date_str)
+                
+                # 如果有时区信息，转换为本地时区并移除时区信息
+                # 这样后续处理统一使用本地时间，避免时间显示错误
+                if dt.tzinfo is not None:
+                    local_tz = tz.tzlocal()
+                    dt = dt.astimezone(local_tz).replace(tzinfo=None)
+                    logger.debug(f"时间已转换为本地时区: {dt}")
+                
+                return dt
             except Exception as e:
                 logger.debug(f"解析日期失败 {date_str}: {e}")
 
@@ -159,12 +171,12 @@ class RSSParser:
                 # 提取 <img> 标签
                 for img in soup.find_all("img"):
                     src = img.get("src", "")
-                    if src and src.startswith("http") and src not in images:
+                    if src and isinstance(src, str) and src.startswith("http") and src not in images:
                         images.append(src)
                 # 提取 <video> 标签的 poster 属性
                 for video in soup.find_all("video"):
                     poster = video.get("poster", "")
-                    if poster and poster.startswith("http") and poster not in images:
+                    if poster and isinstance(poster, str) and poster.startswith("http") and poster not in images:
                         images.append(poster)
             except Exception as e:
                 logger.debug(f"从summary提取图片失败: {e}")
@@ -179,13 +191,14 @@ class RSSParser:
                         # 提取 <img> 标签
                         for img in soup.find_all("img"):
                             src = img.get("src", "")
-                            if src and src.startswith("http") and src not in images:
+                            if src and isinstance(src, str) and src.startswith("http") and src not in images:
                                 images.append(src)
                         # 提取 <video> 标签的 poster 属性
                         for video in soup.find_all("video"):
                             poster = video.get("poster", "")
                             if (
                                 poster
+                                and isinstance(poster, str)
                                 and poster.startswith("http")
                                 and poster not in images
                             ):

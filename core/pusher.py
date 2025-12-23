@@ -20,7 +20,7 @@ class Pusher:
             else {
                 "push": {"batch_interval": 3},
                 "template": {
-                    "default": "🔔 {name}\n\n📰 {title}\n🕐 {pubDate}\n\n📝 {description}\n\n🔗 {link}"
+                    "default": "【{name}】\n📰 {title}\n\n📝 {description}\n\n⏱️ {pubDate} | 👤 {author}\n🔗 动态地址：{link}"
                 },
             }
         )
@@ -145,7 +145,7 @@ class Pusher:
             return await self._send_to_target(target, message, images)
 
     def _format_message(self, sub: Subscription, item: dict) -> str:
-        """格式化消息（优化版）
+        """格式化消息（支持自定义模板）
 
         Args:
             sub: 订阅对象
@@ -154,17 +154,59 @@ class Pusher:
         Returns:
             格式化后的消息
         """
+        # 优先使用订阅的自定义模板，其次使用配置的默认模板
+        template = sub.template
+        if not template:
+            template_config = self.config.get("template", {})
+            template = template_config.get("default")
+        
+        # 如果有模板配置，使用模板格式化
+        if template:
+            try:
+                from ..utils.formatter import MessageFormatter
+                # 处理时间（已经是本地时间）
+                pub_date_str = ""
+                if item.get("pubDate") and isinstance(item["pubDate"], datetime):
+                    pub_date_str = item["pubDate"].strftime("%Y-%m-%d %H:%M")
+                
+                # 准备模板参数
+                template_item = {
+                    "title": item.get("title", ""),
+                    "link": item.get("link", ""),
+                    "description": item.get("description", ""),
+                    "author": item.get("author", ""),
+                    "pubDate": pub_date_str,
+                    "guid": item.get("guid", ""),
+                }
+                
+                formatter = MessageFormatter(template)
+                return formatter.format(sub.name, template_item)
+            except Exception as e:
+                logger.warning(f"使用模板格式化失败: {e}，降级为默认格式")
+        
+        # 没有模板配置或格式化失败，使用内置简化格式
+        return self._format_message_builtin(sub, item)
+    
+    def _format_message_builtin(self, sub: Subscription, item: dict) -> str:
+        """内置简化格式（无需模板配置）
+        
+        Args:
+            sub: 订阅对象
+            item: RSS条目
+        
+        Returns:
+            格式化后的消息
+        """
         # 获取配置
         push_config = self.config.get("push", {})
-        max_len = push_config.get("max_length", 200)
-        show_images = push_config.get("show_images", True)
+        max_len = push_config.get("max_description_length", 200)
         
         # 准备数据
         title = item.get("title", "").strip()
-        link = item.get("link", "")
-        author = item.get("author", "")
+        link = item.get("link", "").strip()
+        author = item.get("author", "").strip()
         
-        # 处理时间
+        # 处理时间（已经是本地时间）
         pub_date_str = ""
         if item.get("pubDate") and isinstance(item["pubDate"], datetime):
             pub_date_str = item["pubDate"].strftime("%Y-%m-%d %H:%M")
@@ -172,94 +214,75 @@ class Pusher:
         # 处理描述
         desc = item.get("description", "").strip()
         
-        # 如果描述以标题开头，去掉标题部分避免重复
-        if desc and title and desc.startswith(title):
-            desc = desc[len(title) :].strip()
-            # 去掉开头的标点符号
-            if desc and desc[0] in ["，", "。", "：", ":", ",", ".", " "]:
-                desc = desc[1:].strip()
+        # 改进的去重逻辑 - 处理标题重复
+        if desc and title:
+            import re
+            
+            # 转义标题中的特殊正则字符
+            escaped_title = re.escape(title)
+            
+            # 移除描述开头的标题（可能带引号）
+            # 匹配: 标题, "标题", '标题' 等，可能重复多次
+            pattern = rf'^[\s"\'"]*({escaped_title}[\s"\'"]*)+[\s\-—:：]*'
+            desc = re.sub(pattern, '', desc, flags=re.IGNORECASE).strip()
+            
+            # 如果描述中还有标题重复（不在开头），也尝试移除
+            # 例如: "标题" "标题" 其他内容
+            pattern2 = rf'({escaped_title}[\s"\'"]*)+[\s\-—:：]*'
+            # 只在开头100个字符内查找并替换一次，避免误删
+            if len(desc) > 0:
+                first_part = desc[:100]
+                if re.search(pattern2, first_part, flags=re.IGNORECASE):
+                    desc = re.sub(pattern2, '', desc, count=1, flags=re.IGNORECASE).strip()
 
-        # 智能截断
+        # 清理描述：移除多余空行和空格
         if desc:
-            # 移除多余空行
-            desc = "\n".join([line.strip() for line in desc.splitlines() if line.strip()])
+            # 移除多个连续空格
+            desc = re.sub(r' +', ' ', desc)
+            # 移除多个连续换行
+            desc = re.sub(r'\n+', '\n', desc)
+            # 截断
             if len(desc) > max_len:
                 desc = desc[:max_len] + "..."
-        else:
-            # 如果没有描述，使用替代文本
-            desc = "📷 包含图片" if item.get("images") else "点击链接查看详情"
-
-        # 构建消息（优化格式和排版，去除不必要的空格和换行）
+            
+            # 如果去重后描述太短（少于3个字符），可能是无意义内容，不显示
+            if len(desc) < 3:
+                desc = ""
+        
+        # 构建消息（优化格式，使用空行分隔）
         msg_parts = []
         
-        # 订阅名称（顶部，带分隔线）
-        separator_length = min(len(sub.name) + 4, 50)
-        msg_parts.append(f"📢 {sub.name}")
-        msg_parts.append("─" * separator_length)
-        
-        # 作者
-        if author:
-            author = author.strip()
-            msg_parts.append(f"👤 {author}")
+        # 订阅名称（使用方括号）
+        msg_parts.append(f"【{sub.name}】")
         
         # 标题
-        title = title.strip()
         if title:
             msg_parts.append(f"📰 {title}")
         
-        # 描述内容
+        # 空行分隔（如果有描述或元信息）
+        if desc or pub_date_str or author:
+            msg_parts.append("")
+        
+        # 描述（只在有实际内容时显示）
         if desc:
-            # 清理描述：去除多余空格和空行
-            desc = desc.strip()
-            # 将多个连续空格替换为单个空格
-            import re
-            desc = re.sub(r' +', ' ', desc)
-            # 将多个连续换行替换为单个换行
-            desc = re.sub(r'\n+', '\n', desc)
-            
-            # 智能换行：如果描述较长，在合适的位置换行
-            if len(desc) > 120:
-                desc_lines = []
-                current_line = ""
-                for char in desc:
-                    current_line += char
-                    # 在句号、问号、感叹号处换行
-                    if char in ["。", "！", "？", ".", "!", "?"] and len(current_line.strip()) > 60:
-                        if current_line.strip():
-                            desc_lines.append(current_line.strip())
-                        current_line = ""
-                if current_line.strip():
-                    desc_lines.append(current_line.strip())
-                desc = "\n".join(desc_lines) if desc_lines else desc
-            
-            # 添加描述，第一行带emoji，后续行对齐到文字内容
-            desc_lines = [line.strip() for line in desc.split("\n") if line.strip()]
-            if desc_lines:
-                # 第一行带emoji
-                first_line = f"📝 {desc_lines[0]}"
-                # 计算对齐所需的空格数（emoji + 空格的长度）
-                indent = " " * (len("📝 ") + len(desc_lines[0]) - len(desc_lines[0].lstrip()))
-                # 后续行对齐到第一行文字内容的起始位置
-                indent_length = len("📝 ")
-                other_lines = [f"{' ' * indent_length}{line}" for line in desc_lines[1:]]
-                # 组合所有行
-                formatted_desc = "\n".join([first_line] + other_lines)
-                msg_parts.append(formatted_desc)
+            msg_parts.append(f"📝 {desc}")
+            msg_parts.append("")  # 描述后加空行
         
-        # 元信息（时间）- 紧凑显示
+        # 时间和作者（紧凑显示在一行）
+        meta_parts = []
         if pub_date_str:
-            msg_parts.append(f"⏱️ {pub_date_str.strip()}")
+            meta_parts.append(f"⏱️ {pub_date_str}")
+        if author:
+            meta_parts.append(f"👤 {author}")
+        if meta_parts:
+            msg_parts.append(" | ".join(meta_parts))
         
-        # 链接（底部）
+        # 链接
         if link:
-            link = link.strip()
-            msg_parts.append(f"🔗 {link}")
+            msg_parts.append(f"🔗 动态地址：{link}")
         
-        # 组合消息，去除空行和多余空格
-        msg = "\n".join([part for part in msg_parts if part.strip()])
-        # 清理连续的空行（最多保留一个）
-        while "\n\n\n" in msg:
-            msg = msg.replace("\n\n\n", "\n\n")
+        # 组合消息
+        msg = "\n".join(msg_parts)
         
         return msg.strip()
 

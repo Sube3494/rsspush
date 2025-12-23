@@ -55,6 +55,13 @@
         "default": 5,
         "minimum": 1,
         "maximum": 20
+      },
+      "max_description_length": {
+        "type": "int",
+        "description": "描述内容最大字符数",
+        "default": 200,
+        "minimum": 50,
+        "maximum": 500
       }
     }
   },
@@ -132,8 +139,8 @@
     "items": {
       "default": {
         "type": "text",
-        "description": "默认消息模板",
-        "default": "🔔 {name}\n\n📰 {title}\n🕐 {pubDate}\n\n📝 {description}\n\n🔗 {link}"
+        "description": "默认消息模板。可用变量：{name}订阅名, {title}标题, {description}描述, {pubDate}时间, {author}作者, {link}链接",
+        "default": "【{name}】\n📰 {title}\n\n📝 {description}\n\n⏱️ {pubDate} | 👤 {author}\n🔗 动态地址：{link}"
       }
     }
   }

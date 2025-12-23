@@ -98,7 +98,7 @@ class MessageFormatter:
         return clean
 
     @staticmethod
-    def _format_date(dt: datetime) -> str:
+    def _format_date(dt: datetime | None) -> str:
         """格式化日期
 
         Args:
@@ -160,13 +160,12 @@ class MessageFormatter:
         Returns:
             使用默认模板的格式化器
         """
-        default_template = """🔔 {name}
-
+        default_template = """【{name}】
 📰 {title}
-🕐 {pubDate}
 
 📝 {description}
 
-🔗 {link}"""
+⏱️ {pubDate} | 👤 {author}
+🔗 动态地址：{link}"""
 
         return MessageFormatter(default_template)

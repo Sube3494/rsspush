@@ -105,9 +105,11 @@ class RSSPushPlugin(star.Star):
         """管理订阅的推送目标
 
         使用方法:
-        /rss target add <订阅ID或名称>  - 将当前会话添加为推送目标
-        /rss target add all             - 将当前会话添加到所有订阅
-        /rss target list <订阅ID或名称> - 查看订阅的推送目标
+        /rss target add <订阅ID或名称>    - 将当前会话添加为推送目标
+        /rss target add all               - 将当前会话添加到所有订阅
+        /rss target remove <订阅ID或名称> - 从订阅中移除当前会话
+        /rss target remove all            - 从所有订阅中移除当前会话
+        /rss target list <订阅ID或名称>   - 查看订阅的推送目标
         """
         if not action:
             yield event.plain_result(
@@ -115,22 +117,24 @@ class RSSPushPlugin(star.Star):
                 "使用方法：\n"
                 "/rss target add <订阅ID或名称> - 添加当前会话为推送目标\n"
                 "/rss target add all - 添加到所有订阅\n"
+                "/rss target remove <订阅ID或名称> - 移除当前会话\n"
+                "/rss target remove all - 从所有订阅移除\n"
                 "/rss target list <订阅ID或名称> - 查看推送目标\n\n"
                 "💡 提示：配置UI创建的订阅需要手动添加推送目标"
             )
             return
 
+        # 当前会话作为推送目标
+        target = Target(
+            type="group" if not event.is_private_chat() else "private",
+            platform=event.get_platform_name(),
+            id=event.unified_msg_origin,
+        )
+
         if action == "add":
             if not sub_id_or_name:
                 yield event.plain_result("❌ 请指定订阅ID/名称或使用 'all'")
                 return
-
-            # 当前会话作为推送目标
-            target = Target(
-                type="group" if not event.is_private_chat() else "private",
-                platform=event.get_platform_name(),
-                id=event.unified_msg_origin,
-            )
 
             if sub_id_or_name.lower() == "all":
                 # 添加到所有订阅
@@ -153,6 +157,37 @@ class RSSPushPlugin(star.Star):
                 else:
                     yield event.plain_result(
                         f"ℹ️ 当前会话已经是订阅 {sub.name} 的推送目标"
+                    )
+
+        elif action == "remove":
+            if not sub_id_or_name:
+                yield event.plain_result("❌ 请指定订阅ID/名称或使用 'all'")
+                return
+
+            if sub_id_or_name.lower() == "all":
+                # 从所有订阅中移除
+                count = 0
+                for sub in self.sub_manager.list_all():
+                    if self.sub_manager.remove_target(sub.id, target.id):
+                        count += 1
+                if count > 0:
+                    yield event.plain_result(f"✅ 已从 {count} 个订阅中移除当前会话")
+                else:
+                    yield event.plain_result("ℹ️ 当前会话不是任何订阅的推送目标")
+            else:
+                # 从指定订阅移除
+                sub = self.sub_manager.get(
+                    sub_id_or_name
+                ) or self.sub_manager.get_by_name(sub_id_or_name)
+                if not sub:
+                    yield event.plain_result(f"❌ 未找到订阅: {sub_id_or_name}")
+                    return
+
+                if self.sub_manager.remove_target(sub.id, target.id):
+                    yield event.plain_result(f"✅ 已从订阅 {sub.name} 移除当前会话")
+                else:
+                    yield event.plain_result(
+                        f"ℹ️ 当前会话不是订阅 {sub.name} 的推送目标"
                     )
 
         elif action == "list":
@@ -178,7 +213,7 @@ class RSSPushPlugin(star.Star):
                 msg += f"{i}. {t.type} @ {t.platform}\n   ID: {t.id}\n"
             yield event.plain_result(msg)
         else:
-            yield event.plain_result(f"❌ 未知操作: {action}")
+            yield event.plain_result(f"❌ 未知操作: {action}\n\n使用 /rss target 查看帮助")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("rss add")
@@ -186,14 +221,18 @@ class RSSPushPlugin(star.Star):
         """添加RSS订阅（通过命令，推荐使用WebUI配置）
 
         使用方法: /rss add <RSS地址> [订阅名称]
+        如果不提供名称，会自动从RSS feed中获取
         """
         if not url:
             yield event.plain_result(
                 "📝 使用方法：\n"
                 "/rss add <RSS地址> [订阅名称]\n\n"
                 "示例：\n"
+                "/rss add https://rsshub.app/bilibili/user/video/2\n"
                 "/rss add https://rsshub.app/bilibili/user/video/2 B站UP主\n\n"
-                "💡 提示：推荐在WebUI的插件配置中添加订阅"
+                "💡 提示：\n"
+                "- 不提供名称会自动从RSS中获取\n"
+                "- 推荐在WebUI的插件配置中添加订阅"
             )
             return
 
@@ -206,16 +245,37 @@ class RSSPushPlugin(star.Star):
             url = rsshub_instance + url
             logger.info(f"RSSHub路由转换为完整URL: {url}")
 
+        # 如果没有提供名称，尝试从RSS feed获取
+        if not name and self.fetcher:
+            yield event.plain_result(f"🔄 正在获取RSS信息...")
+            try:
+                feed = await self.fetcher.fetch(url)
+                if feed and hasattr(feed, 'feed') and hasattr(feed.feed, 'get'):  # type: ignore
+                    # 尝试从feed metadata获取标题
+                    feed_info = feed.feed  # type: ignore
+                    name = (
+                        feed_info.get('title') or 
+                        feed_info.get('subtitle') or 
+                        url
+                    )
+                    logger.info(f"自动获取订阅名称: {name}")
+                else:
+                    name = url
+                    logger.warning(f"无法获取RSS标题，使用URL作为名称")
+            except Exception as e:
+                logger.error(f"获取RSS信息失败: {e}")
+                name = url
+        
+        # 如果仍然没有名称（fetcher未初始化），使用URL
+        if not name:
+            name = url
+
         # 默认推送到当前会话
         target = Target(
             type="group" if not event.is_private_chat() else "private",
             platform=event.get_platform_name(),
             id=event.unified_msg_origin,
         )
-
-        # 如果没有提供名称，使用URL作为名称
-        if not name:
-            name = url
 
         try:
             sub = self.sub_manager.add(name, url, [target])
@@ -386,8 +446,27 @@ class RSSPushPlugin(star.Star):
         try:
             # 手动检查这个订阅
             if self.scheduler:
+                # 记录执行前的推送次数
+                push_count_before = sub.stats.total_pushes
+                
                 await self.scheduler.check_subscription(sub)
-                yield event.plain_result("✅ 测试完成\n\n如有新内容已推送到目标")
+                
+                # 计算新推送
+                new_pushes = sub.stats.total_pushes - push_count_before
+                
+                # 重新获取最新数据
+                sub = self.sub_manager.get(sub_id)
+                
+                msg = "✅ 测试完成\n\n"
+                if new_pushes > 0:
+                    msg += f"📤 已推送 {new_pushes} 条新内容到目标"
+                else:
+                    msg += "💭 暂无新内容"
+                
+                if sub and sub.last_push:
+                    msg += f"\n⏰ 最后推送：{sub.last_push.strftime('%m-%d %H:%M')}"
+                
+                yield event.plain_result(msg)
             else:
                 yield event.plain_result("❌ 调度器未启动")
         except Exception as e:
@@ -409,8 +488,37 @@ class RSSPushPlugin(star.Star):
             yield event.plain_result("🔄 正在检查所有订阅...\n请稍候...")
             try:
                 if self.scheduler:
+                    # 记录执行前的推送次数
+                    enabled_subs = self.sub_manager.list_enabled()
+                    push_counts_before = {sub.id: sub.stats.total_pushes for sub in enabled_subs}
+                    
                     await self.scheduler.check_all_subscriptions()
-                    yield event.plain_result("✅ 检查完成")
+                    
+                    # 计算推送统计
+                    total_new_pushes = 0
+                    pushed_subs = []
+                    for sub in self.sub_manager.list_enabled():
+                        new_pushes = sub.stats.total_pushes - push_counts_before.get(sub.id, 0)
+                        if new_pushes > 0:
+                            total_new_pushes += new_pushes
+                            pushed_subs.append(f"{sub.name} ({new_pushes}条)")
+                    
+                    # 构建结果消息
+                    msg = "✅ 检查完成\n\n"
+                    msg += f"📊 检查结果：\n"
+                    msg += f"  检查订阅数：{len(enabled_subs)} 个\n"
+                    msg += f"  新推送：{total_new_pushes} 条\n"
+                    
+                    if pushed_subs:
+                        msg += f"\n📤 已推送：\n"
+                        for sub_info in pushed_subs[:5]:  # 最多显示5个
+                            msg += f"  • {sub_info}\n"
+                        if len(pushed_subs) > 5:
+                            msg += f"  ...及其他 {len(pushed_subs) - 5} 个订阅\n"
+                    else:
+                        msg += "\n💭 所有订阅均无新内容"
+                    
+                    yield event.plain_result(msg)
                 else:
                     yield event.plain_result("❌ 调度器未启动")
             except Exception as e:
@@ -426,8 +534,31 @@ class RSSPushPlugin(star.Star):
 
             try:
                 if self.scheduler:
+                    # 记录执行前的推送次数
+                    push_count_before = sub.stats.total_pushes
+                    
                     await self.scheduler.check_subscription(sub)
-                    yield event.plain_result("✅ 检查完成")
+                    
+                    # 计算新推送
+                    new_pushes = sub.stats.total_pushes - push_count_before
+                    
+                    # 重新获取最新数据
+                    sub = self.sub_manager.get(sub_id)
+                    
+                    msg = "✅ 检查完成\n\n"
+                    if sub:
+                        msg += f"📊 订阅：{sub.name}\n"
+                        if new_pushes > 0:
+                            msg += f"📤 新推送：{new_pushes} 条"
+                        else:
+                            msg += "💭 暂无新内容"
+                        
+                        if sub.last_check:
+                            msg += f"\n⏰ 检查时间：{sub.last_check.strftime('%H:%M')}"
+                    else:
+                        msg += "⚠️ 订阅信息获取失败"
+                    
+                    yield event.plain_result(msg)
                 else:
                     yield event.plain_result("❌ 调度器未启动")
             except Exception as e:
@@ -513,7 +644,7 @@ class RSSPushPlugin(star.Star):
 进入插件配置 → RSS推送 → 管理订阅和全局设置
 
 📋 订阅管理（命令方式）：
-/rss add <url> [名称] - 添加订阅
+/rss add <url> [名称] - 添加订阅（名称可选，自动从RSS获取）
 /rss del <ID> - 删除订阅
 /rss list - 查看所有订阅
 /rss info <ID> - 查看订阅详情
@@ -523,6 +654,8 @@ class RSSPushPlugin(star.Star):
 🎯 推送目标管理：
 /rss target add <ID/名称> - 添加当前会话为推送目标
 /rss target add all - 添加到所有订阅
+/rss target remove <ID/名称> - 从订阅中移除当前会话
+/rss target remove all - 从所有订阅中移除
 /rss target list <ID/名称> - 查看推送目标
 
 🔧 推送控制：

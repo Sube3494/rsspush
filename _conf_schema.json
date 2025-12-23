@@ -139,8 +139,8 @@
     "items": {
       "default": {
         "type": "text",
-        "description": "默认消息模板。可用变量：{name}订阅名, {title}标题, {description}描述, {pubDate}时间, {author}作者, {link}链接",
-        "default": "【{name}】\n📰 {title}\n\n📝 {description}\n\n⏱️ {pubDate} | 👤 {author}\n🔗 动态地址：{link}"
+        "description": "默认消息模板。可用变量：{name}订阅名, {title}标题, {display_title}显示标题, {clean_description}清理后的描述, {video_url}视频链接, {description}原始描述, {pubDate}发布时间, {author}作者, {link}链接地址",
+        "default": "【{name}】\n📰 {title}\n\n📝 {clean_description}\n\n🎬 {video_url}\n\n⏱️ {pubDate} | 👤 {author}\n🔗 {link}"
       }
     }
   }

@@ -428,12 +428,12 @@ class RSSPushPlugin(star.Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("rss test")
     async def rss_test(self, event: AstrMessageEvent, sub_id: str = ""):
-        """测试推送（立即推送最新一条）
+        """测试订阅推送（强制推送最新1条，不记录）
 
         使用方法: /rss test <订阅ID>
         """
         if not sub_id:
-            yield event.plain_result("请指定订阅ID\n\n使用 /rss list 查看所有订阅")
+            yield event.plain_result("❌ 请指定订阅ID")
             return
 
         sub = self.sub_manager.get(sub_id)
@@ -441,34 +441,58 @@ class RSSPushPlugin(star.Star):
             yield event.plain_result(f"❌ 未找到订阅: {sub_id}")
             return
 
-        yield event.plain_result(f"🔄 正在测试订阅: {sub.name}\n请稍候...")
+        if not sub.enabled:
+            yield event.plain_result(
+                f"⚠️ 订阅 {sub.name} 已禁用\n\n使用 /rss enable {sub.id[:8]} 启用"
+            )
+            return
+
+        if not sub.targets:
+            yield event.plain_result(
+                f"⚠️ 订阅 {sub.name} 没有推送目标\n\n"
+                f"使用 /rss target add {sub.id[:8]} 添加当前会话"
+            )
+            return
+
+        yield event.plain_result(
+            f"🔄 正在测试订阅: {sub.name}\n请稍候…"
+        )
 
         try:
-            # 手动检查这个订阅
-            if self.scheduler:
-                # 记录执行前的推送次数
-                push_count_before = sub.stats.total_pushes
+            # 检查fetcher是否初始化
+            if not self.fetcher:
+                yield event.plain_result(f"❌ RSS获取器未初始化")
+                return
                 
-                await self.scheduler.check_subscription(sub)
-                
-                # 计算新推送
-                new_pushes = sub.stats.total_pushes - push_count_before
-                
-                # 重新获取最新数据
-                sub = self.sub_manager.get(sub_id)
-                
-                msg = "✅ 测试完成\n\n"
-                if new_pushes > 0:
-                    msg += f"📤 已推送 {new_pushes} 条新内容到目标"
-                else:
-                    msg += "💭 暂无新内容"
-                
-                if sub and sub.last_push:
-                    msg += f"\n⏰ 最后推送：{sub.last_push.strftime('%m-%d %H:%M')}"
-                
-                yield event.plain_result(msg)
-            else:
-                yield event.plain_result("❌ 调度器未启动")
+            # 获取RSS内容
+            feed = await self.fetcher.fetch(sub.url)
+            if not feed or not hasattr(feed, "entries") or not feed.entries:  # type: ignore
+                yield event.plain_result(f"❌ 无法获取RSS内容或内容为空")
+                return
+
+            # 解析最新的1条
+            from .utils.parser import RSSParser
+            entries = RSSParser.parse_entries({"entries": feed.entries[:1]})  # type: ignore
+            
+            if not entries or not entries[0].get("guid"):
+                yield event.plain_result(f"❌ RSS内容解析失败")
+                return
+
+            # 检查pusher是否初始化
+            if not self.pusher:
+                yield event.plain_result(f"❌ 推送器未初始化")
+                return
+
+            # 直接推送，不检查是否已推送，也不记录
+            await self.pusher.push(sub, entries)
+            
+            yield event.plain_result(
+                f"✅ 测试推送完成\n\n"
+                f"📰 推送内容：{entries[0].get('title', '无标题')}\n"
+                f"🔗 链接：{entries[0].get('link', '')}\n\n"
+                f"💡 提示：测试推送不会记录到数据库"
+            )
+
         except Exception as e:
             logger.error(f"测试推送失败: {e}")
             yield event.plain_result(f"❌ 测试失败: {str(e)}")

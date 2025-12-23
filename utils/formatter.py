@@ -1,6 +1,7 @@
 """消息格式化器模块"""
 
 import html
+import re
 from datetime import datetime
 
 from bs4 import BeautifulSoup
@@ -30,24 +31,59 @@ class MessageFormatter:
             格式化后的消息
         """
         try:
-            # 准备格式化参数
+            # 准备格式化参数（使用传入的所有变量）
             params = {
                 "name": sub_name,
-                "title": item.get("title", ""),
-                "link": item.get("link", ""),
-                "description": self._truncate(
-                    self._clean_text(item.get("description", "")), 200
-                ),
-                "pubDate": self._format_date(item.get("pubDate")),
-                "author": item.get("author", ""),
-                "guid": item.get("guid", ""),
             }
+            # 添加 item 中的所有键值对
+            params.update(item)
+            
+            # 格式化时间（如果存在）
+            if "pubDate" in params and not isinstance(params["pubDate"], str):
+                params["pubDate"] = self._format_date(params["pubDate"])
 
             # 格式化模板
             message = self.template.format(**params)
+            
+            # 后处理：清理包含空值的行
+            lines = message.split('\n')
+            cleaned_lines = []
+            
+            for line in lines:
+                # 跳过只包含空白的行
+                if not line.strip():
+                    cleaned_lines.append('')
+                    continue
+                
+                # 检查是否包含emoji后面紧跟空白（说明变量是空的）
+                # 例如: "🎬 " 或 "🎬  " 或 "🎬"
+                if re.match(r'^[\U0001F300-\U0001F9FF]\s*$', line.strip()):
+                    continue  # 跳过这一行
+                
+                cleaned_lines.append(line)
+            
+            # 清理连续的多个空行，最多保留一个
+            final_lines = []
+            prev_empty = False
+            for line in cleaned_lines:
+                is_empty = not line.strip()
+                if is_empty and prev_empty:
+                    continue  # 跳过连续的空行
+                final_lines.append(line)
+                prev_empty = is_empty
+            
+            # 移除开头和结尾的空行
+            while final_lines and not final_lines[0].strip():
+                final_lines.pop(0)
+            while final_lines and not final_lines[-1].strip():
+                final_lines.pop()
+            
+            return '\n'.join(final_lines)
 
-            return message
-
+        except KeyError as e:
+            logger.error(f"格式化消息失败，缺少变量: {e}")
+            # 降级为简单格式
+            return f"{sub_name}\n\n{item.get('title', '')}\n\n{item.get('link', '')}"
         except Exception as e:
             logger.error(f"格式化消息失败: {e}")
             # 降级为简单格式

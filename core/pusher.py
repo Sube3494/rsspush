@@ -145,7 +145,7 @@ class Pusher:
             return await self._send_to_target(target, message, images)
 
     def _format_message(self, sub: Subscription, item: dict) -> str:
-        """格式化消息（支持自定义模板）
+        """格式化消息（使用内容处理器）
 
         Args:
             sub: 订阅对象
@@ -154,6 +154,15 @@ class Pusher:
         Returns:
             格式化后的消息
         """
+        # 使用内容处理器工厂获取合适的处理器
+        from ..utils.content_processor import ContentProcessorFactory
+        
+        factory = ContentProcessorFactory()
+        processor = factory.get_processor(sub.url)
+        
+        # 处理内容
+        processed = processor.process(item, self.config)
+        
         # 优先使用订阅的自定义模板，其次使用配置的默认模板
         template = sub.template
         if not template:
@@ -164,16 +173,21 @@ class Pusher:
         if template:
             try:
                 from ..utils.formatter import MessageFormatter
+                
                 # 处理时间（已经是本地时间）
                 pub_date_str = ""
                 if item.get("pubDate") and isinstance(item["pubDate"], datetime):
                     pub_date_str = item["pubDate"].strftime("%Y-%m-%d %H:%M")
                 
-                # 准备模板参数
+                # 准备模板参数（使用处理器处理后的数据）
                 template_item = {
-                    "title": item.get("title", ""),
+                    "title": item.get("title", "").strip(),
+                    "display_title": processed.get("display_title", ""),
                     "link": item.get("link", ""),
-                    "description": item.get("description", ""),
+                    "description": item.get("description", ""),  # 原始描述
+                    "clean_description": processed.get("clean_description", ""),  # 清理后的描述
+                    "video_url": processed.get("video_url", ""),  # 视频链接
+                    "extra_links": processed.get("extra_links", {}),  # 额外链接
                     "author": item.get("author", ""),
                     "pubDate": pub_date_str,
                     "guid": item.get("guid", ""),
@@ -185,22 +199,19 @@ class Pusher:
                 logger.warning(f"使用模板格式化失败: {e}，降级为默认格式")
         
         # 没有模板配置或格式化失败，使用内置简化格式
-        return self._format_message_builtin(sub, item)
+        return self._format_message_builtin(sub, item, processed)
     
-    def _format_message_builtin(self, sub: Subscription, item: dict) -> str:
+    def _format_message_builtin(self, sub: Subscription, item: dict, processed: dict) -> str:
         """内置简化格式（无需模板配置）
         
         Args:
             sub: 订阅对象
             item: RSS条目
+            processed: 内容处理器处理后的数据
         
         Returns:
             格式化后的消息
         """
-        # 获取配置
-        push_config = self.config.get("push", {})
-        max_len = push_config.get("max_description_length", 200)
-        
         # 准备数据
         title = item.get("title", "").strip()
         link = item.get("link", "").strip()
@@ -211,73 +222,42 @@ class Pusher:
         if item.get("pubDate") and isinstance(item["pubDate"], datetime):
             pub_date_str = item["pubDate"].strftime("%Y-%m-%d %H:%M")
 
-        # 处理描述
-        desc = item.get("description", "").strip()
+        # 使用处理器处理后的数据
+        clean_desc = processed.get("clean_description", "")
+        video_url = processed.get("video_url", "")
+        extra_links = processed.get("extra_links", {})
         
-        # 改进的去重逻辑 - 处理标题重复
-        if desc and title:
-            import re
-            
-            # 转义标题中的特殊正则字符
-            escaped_title = re.escape(title)
-            
-            # 移除描述开头的标题（可能带引号）
-            # 匹配: 标题, "标题", '标题' 等，可能重复多次
-            pattern = rf'^[\s"\'"]*({escaped_title}[\s"\'"]*)+[\s\-—:：]*'
-            desc = re.sub(pattern, '', desc, flags=re.IGNORECASE).strip()
-            
-            # 如果描述中还有标题重复（不在开头），也尝试移除
-            # 例如: "标题" "标题" 其他内容
-            pattern2 = rf'({escaped_title}[\s"\'"]*)+[\s\-—:：]*'
-            # 只在开头100个字符内查找并替换一次，避免误删
-            if len(desc) > 0:
-                first_part = desc[:100]
-                if re.search(pattern2, first_part, flags=re.IGNORECASE):
-                    desc = re.sub(pattern2, '', desc, count=1, flags=re.IGNORECASE).strip()
-
-        # 清理描述：移除多余空行和空格
-        if desc:
-            # 移除多个连续空格
-            desc = re.sub(r' +', ' ', desc)
-            # 移除多个连续换行
-            desc = re.sub(r'\n+', '\n', desc)
-            # 截断
-            if len(desc) > max_len:
-                desc = desc[:max_len] + "..."
-            
-            # 如果去重后描述太短（少于3个字符），可能是无意义内容，不显示
-            if len(desc) < 3:
-                desc = ""
-        
-        # 构建消息（优化格式，使用空行分隔）
+        # 构建消息（优化格式）
         msg_parts = []
         
-        # 订阅名称（使用方括号）
+        # 订阅名称
         msg_parts.append(f"【{sub.name}】")
         
-        # 标题
-        if title:
-            msg_parts.append(f"📰 {title}")
+        # 描述（作为主要内容）
+        if clean_desc:
+            msg_parts.append("")  # 空行
+            msg_parts.append(f"📝 {clean_desc}")
         
-        # 空行分隔（如果有描述或元信息）
-        if desc or pub_date_str or author:
-            msg_parts.append("")
+        # 视频链接（如果有）
+        if video_url:
+            msg_parts.append("")  # 空行
+            msg_parts.append(f"🎬 视频：{video_url}")
         
-        # 描述（只在有实际内容时显示）
-        if desc:
-            msg_parts.append(f"📝 {desc}")
-            msg_parts.append("")  # 描述后加空行
+        # 额外链接（如图文链接）
+        if extra_links.get('opus'):
+            msg_parts.append(f"📄 图文：{extra_links['opus']}")
         
-        # 时间和作者（紧凑显示在一行）
-        meta_parts = []
-        if pub_date_str:
-            meta_parts.append(f"⏱️ {pub_date_str}")
-        if author:
-            meta_parts.append(f"👤 {author}")
-        if meta_parts:
+        # 元信息行（时间和作者）
+        if pub_date_str or author:
+            msg_parts.append("")  # 空行
+            meta_parts = []
+            if pub_date_str:
+                meta_parts.append(f"⏱️ {pub_date_str}")
+            if author:
+                meta_parts.append(f"👤 {author}")
             msg_parts.append(" | ".join(meta_parts))
         
-        # 链接
+        # 动态链接
         if link:
             msg_parts.append(f"🔗 动态地址：{link}")
         

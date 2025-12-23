@@ -221,6 +221,7 @@ class RSSPushPlugin(star.Star):
         """添加RSS订阅（通过命令，推荐使用WebUI配置）
 
         使用方法: /rss add <RSS地址> [订阅名称]
+        批量添加: /rss add <URL1> <URL2> <URL3> ...
         如果不提供名称，会自动从RSS feed中获取
         """
         if not url:
@@ -230,66 +231,127 @@ class RSSPushPlugin(star.Star):
                 "示例：\n"
                 "/rss add https://rsshub.app/bilibili/user/video/2\n"
                 "/rss add https://rsshub.app/bilibili/user/video/2 B站UP主\n\n"
+                "📦 批量添加：\n"
+                "/rss add <URL1> <URL2> <URL3> ...\n\n"
+                "示例：\n"
+                "/rss add https://rsshub.app/bilibili/user/video/1 https://rsshub.app/bilibili/user/video/2\n\n"
                 "💡 提示：\n"
-                "- 不提供名称会自动从RSS中获取\n"
+                "- 批量添加时，多个URL用空格分隔\n"
+                "- 批量添加会自动从RSS获取名称\n"
                 "- 推荐在WebUI的插件配置中添加订阅"
             )
             return
 
-        # 处理RSSHub路由快捷方式
-        if url.startswith("/"):
-            rsshub_config = self.plugin_config.get("rsshub", {})
-            rsshub_instance = rsshub_config.get(
-                "default_instance", "https://rsshub.app"
-            )
-            url = rsshub_instance + url
-            logger.info(f"RSSHub路由转换为完整URL: {url}")
-
-        # 如果没有提供名称，尝试从RSS feed获取
-        if not name and self.fetcher:
-            yield event.plain_result(f"🔄 正在获取RSS信息...")
-            try:
-                feed = await self.fetcher.fetch(url)
-                if feed and hasattr(feed, 'feed') and hasattr(feed.feed, 'get'):  # type: ignore
-                    # 尝试从feed metadata获取标题
-                    feed_info = feed.feed  # type: ignore
-                    name = (
-                        feed_info.get('title') or 
-                        feed_info.get('subtitle') or 
-                        url
-                    )
-                    logger.info(f"自动获取订阅名称: {name}")
-                else:
-                    name = url
-                    logger.warning(f"无法获取RSS标题，使用URL作为名称")
-            except Exception as e:
-                logger.error(f"获取RSS信息失败: {e}")
-                name = url
+        # 检测是否为批量添加（包含多个URL）
+        # 将url和name合并，然后识别所有URL
+        full_text = f"{url} {name}".strip()
         
-        # 如果仍然没有名称（fetcher未初始化），使用URL
-        if not name:
-            name = url
+        # 使用正则表达式提取所有URL（http/https开头或/开头的RSSHub路由）
+        import re
+        url_pattern = r'(https?://[^\s]+|/[^\s]+)'
+        urls = re.findall(url_pattern, full_text)
+        
+        if not urls:
+            yield event.plain_result("❌ 未识别到有效的URL")
+            return
+        
+        # 如果只有一个URL且提供了名称，使用原逻辑
+        if len(urls) == 1 and name and not re.match(url_pattern, name):
+            url_to_add = urls[0]
+            custom_name = name
+            
+            # 处理RSSHub路由快捷方式
+            if url_to_add.startswith("/"):
+                rsshub_config = self.plugin_config.get("rsshub", {})
+                rsshub_instance = rsshub_config.get(
+                    "default_instance", "https://rsshub.app"
+                )
+                url_to_add = rsshub_instance + url_to_add
+                logger.info(f"RSSHub路由转换为完整URL: {url_to_add}")
+            
+            # 默认推送到当前会话
+            target = Target(
+                type="group" if not event.is_private_chat() else "private",
+                platform=event.get_platform_name(),
+                id=event.unified_msg_origin,
+            )
+            
+            try:
+                sub = self.sub_manager.add(custom_name, url_to_add, [target])
+                msg = "✅ 订阅添加成功！\n\n"
+                msg += "📋 订阅信息：\n"
+                msg += f"  ID: {sub.id[:8]}...\n"
+                msg += f"  名称: {sub.name}\n"
+                msg += f"  地址: {sub.url}\n"
+                msg += "  推送到: 当前会话\n"
+                msg += f"  状态: {'✅ 已启用' if sub.enabled else '❌ 已禁用'}"
+                yield event.plain_result(msg)
+            except Exception as e:
+                logger.error(f"添加订阅失败: {e}")
+                yield event.plain_result(f"❌ 添加订阅失败: {str(e)}")
+            return
+        
+        # 批量添加模式
+        yield event.plain_result(f"🔄 开始批量添加 {len(urls)} 个订阅...")
+        
+        success_count = 0
+        fail_count = 0
+        results = []
+        
+        for idx, url_to_add in enumerate(urls, 1):
+            try:
+                # 处理RSSHub路由快捷方式
+                if url_to_add.startswith("/"):
+                    rsshub_config = self.plugin_config.get("rsshub", {})
+                    rsshub_instance = rsshub_config.get(
+                        "default_instance", "https://rsshub.app"
+                    )
+                    url_to_add = rsshub_instance + url_to_add
+                    logger.info(f"RSSHub路由转换为完整URL: {url_to_add}")
+                
+                # 获取RSS名称
+                feed_name = url_to_add
+                if self.fetcher:
+                    try:
+                        feed = await self.fetcher.fetch(url_to_add)
+                        if feed and hasattr(feed, 'feed') and hasattr(feed.feed, 'get'):  # type: ignore
+                            feed_info = feed.feed  # type: ignore
+                            feed_name = (
+                                feed_info.get('title') or 
+                                feed_info.get('subtitle') or 
+                                url_to_add
+                            )
+                            logger.info(f"[{idx}/{len(urls)}] 自动获取订阅名称: {feed_name}")
+                    except Exception as e:
+                        logger.warning(f"[{idx}/{len(urls)}] 无法获取RSS标题: {e}")
+                
+                # 默认推送到当前会话
+                target = Target(
+                    type="group" if not event.is_private_chat() else "private",
+                    platform=event.get_platform_name(),
+                    id=event.unified_msg_origin,
+                )
+                
+                # 添加订阅
+                sub = self.sub_manager.add(feed_name, url_to_add, [target])
+                results.append(f"✅ [{idx}] {sub.name[:30]}...")
+                success_count += 1
+                logger.info(f"[{idx}/{len(urls)}] 订阅添加成功: {sub.name}")
+                
+            except Exception as e:
+                results.append(f"❌ [{idx}] {url_to_add[:40]}... - {str(e)[:30]}")
+                fail_count += 1
+                logger.error(f"[{idx}/{len(urls)}] 添加订阅失败: {e}")
+        
+        # 输出结果
+        msg = f"📦 批量添加完成\n\n"
+        msg += f"✅ 成功: {success_count} 个\n"
+        msg += f"❌ 失败: {fail_count} 个\n\n"
+        msg += "详细结果：\n"
+        msg += "\n".join(results)
+        
+        yield event.plain_result(msg)
 
-        # 默认推送到当前会话
-        target = Target(
-            type="group" if not event.is_private_chat() else "private",
-            platform=event.get_platform_name(),
-            id=event.unified_msg_origin,
-        )
-
-        try:
-            sub = self.sub_manager.add(name, url, [target])
-            msg = "✅ 订阅添加成功！\n\n"
-            msg += "📋 订阅信息：\n"
-            msg += f"  ID: {sub.id[:8]}...\n"
-            msg += f"  名称: {sub.name}\n"
-            msg += f"  地址: {sub.url}\n"
-            msg += "  推送到: 当前会话\n"
-            msg += f"  状态: {'✅ 已启用' if sub.enabled else '❌ 已禁用'}"
-            yield event.plain_result(msg)
-        except Exception as e:
-            logger.error(f"添加订阅失败: {e}")
-            yield event.plain_result(f"❌ 添加订阅失败: {str(e)}")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("rss list")
@@ -365,25 +427,120 @@ class RSSPushPlugin(star.Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("rss del")
-    async def rss_del(self, event: AstrMessageEvent, sub_id: str = ""):
+    async def rss_del(
+        self, event: AstrMessageEvent, 
+        id1: str = "", id2: str = "", id3: str = "", id4: str = "", id5: str = "",
+        id6: str = "", id7: str = "", id8: str = "", id9: str = "", id10: str = ""
+    ):
         """删除订阅
 
         使用方法: /rss del <订阅ID>
+        批量删除: /rss del <ID1> <ID2> <ID3> ... (最多10个)
+        ID支持前缀匹配，例如：/rss del 6b8a 会匹配 6b8a1234...
         """
-        if not sub_id:
+        # 收集所有非空ID参数
+        all_ids = [id1, id2, id3, id4, id5, id6, id7, id8, id9, id10]
+        id_list = [id_str for id_str in all_ids if id_str]
+        
+        if not id_list:
             yield event.plain_result("请指定订阅ID\n\n使用 /rss list 查看所有订阅")
             return
+        
+        if len(id_list) == 1:
+            # 单个删除（原逻辑）
+            target_id = id_list[0]
+            
+            # 尝试前缀匹配
+            matched_sub = None
+            if len(target_id) < 36:  # 不是完整UUID，尝试前缀匹配
+                all_subs = self.sub_manager.list_all()
+                matches = [s for s in all_subs if s.id.startswith(target_id)]
+                
+                if len(matches) == 0:
+                    yield event.plain_result(f"❌ 未找到匹配的订阅: {target_id}")
+                    return
+                elif len(matches) > 1:
+                    msg = f"⚠️ 找到多个匹配的订阅，请使用更长的ID前缀：\n\n"
+                    for s in matches[:5]:  # 最多显示5个
+                        msg += f"  {s.id[:8]}... - {s.name}\n"
+                    if len(matches) > 5:
+                        msg += f"  ... 还有 {len(matches) - 5} 个匹配项"
+                    yield event.plain_result(msg)
+                    return
+                else:
+                    matched_sub = matches[0]
+            else:
+                # 完整ID，直接查询
+                matched_sub = self.sub_manager.get(target_id)
+            
+            if not matched_sub:
+                yield event.plain_result(f"❌ 未找到订阅: {target_id}")
+                return
 
-        # 先获取订阅信息用于确认消息
-        sub = self.sub_manager.get(sub_id)
-        if not sub:
-            yield event.plain_result(f"❌ 未找到订阅: {sub_id}")
+            if self.sub_manager.delete(matched_sub.id):
+                yield event.plain_result(f"✅ 订阅已删除\n\n{matched_sub.name} ({matched_sub.id[:8]}...)")
+            else:
+                yield event.plain_result("❌ 删除失败")
             return
+        
+        # 批量删除模式
+        yield event.plain_result(f"🔄 开始批量删除 {len(id_list)} 个订阅...")
+        
+        success_count = 0
+        fail_count = 0
+        results = []
+        all_subs = self.sub_manager.list_all()  # 获取所有订阅用于前缀匹配
+        
+        for idx, target_id in enumerate(id_list, 1):
+            try:
+                # 尝试前缀匹配
+                matched_sub = None
+                if len(target_id) < 36:  # 不是完整UUID
+                    matches = [s for s in all_subs if s.id.startswith(target_id)]
+                    
+                    if len(matches) == 0:
+                        results.append(f"❌ [{idx}] {target_id} - 未找到匹配")
+                        fail_count += 1
+                        continue
+                    elif len(matches) > 1:
+                        results.append(f"⚠️ [{idx}] {target_id} - 匹配到{len(matches)}个，跳过")
+                        fail_count += 1
+                        continue
+                    else:
+                        matched_sub = matches[0]
+                else:
+                    matched_sub = self.sub_manager.get(target_id)
+                
+                if not matched_sub:
+                    results.append(f"❌ [{idx}] {target_id} - 未找到")
+                    fail_count += 1
+                    continue
+                
+                # 删除订阅
+                if self.sub_manager.delete(matched_sub.id):
+                    results.append(f"✅ [{idx}] {matched_sub.name[:30]}...")
+                    success_count += 1
+                    # 从列表中移除已删除的订阅，避免后续匹配到
+                    all_subs = [s for s in all_subs if s.id != matched_sub.id]
+                    logger.info(f"[{idx}/{len(id_list)}] 订阅删除成功: {matched_sub.name}")
+                else:
+                    results.append(f"❌ [{idx}] {matched_sub.name[:30]}... - 删除失败")
+                    fail_count += 1
+                    
+            except Exception as e:
+                results.append(f"❌ [{idx}] {target_id} - {str(e)[:30]}")
+                fail_count += 1
+                logger.error(f"[{idx}/{len(id_list)}] 删除订阅失败: {e}")
+        
+        # 输出结果
+        msg = f"📦 批量删除完成\n\n"
+        msg += f"✅ 成功: {success_count} 个\n"
+        msg += f"❌ 失败: {fail_count} 个\n\n"
+        msg += "详细结果：\n"
+        msg += "\n".join(results)
+        
+        yield event.plain_result(msg)
 
-        if self.sub_manager.delete(sub_id):
-            yield event.plain_result(f"✅ 订阅已删除\n\n{sub.name} ({sub.id[:8]}...)")
-        else:
-            yield event.plain_result("❌ 删除失败")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("rss enable")

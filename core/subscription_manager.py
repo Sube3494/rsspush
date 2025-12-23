@@ -33,7 +33,15 @@ class SubscriptionManager:
 
         Returns:
             新创建的订阅对象
+            
+        Raises:
+            ValueError: 当URL已存在时
         """
+        # 检查URL是否已存在
+        for existing_sub in self.subscriptions:
+            if existing_sub.url == url:
+                raise ValueError(f"订阅已存在：{existing_sub.name} ({existing_sub.id[:8]}...)")
+        
         sub = Subscription(name=name, url=url, targets=targets)
         self.subscriptions.append(sub)
         self.save()

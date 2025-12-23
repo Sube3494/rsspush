@@ -217,14 +217,22 @@ class RSSPushPlugin(star.Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("rss add")
-    async def rss_add(self, event: AstrMessageEvent, url: str = "", name: str = ""):
+    async def rss_add(
+        self, event: AstrMessageEvent,
+        url1: str = "", url2: str = "", url3: str = "", url4: str = "", url5: str = "",
+        url6: str = "", url7: str = "", url8: str = "", url9: str = "", url10: str = ""
+    ):
         """添加RSS订阅（通过命令，推荐使用WebUI配置）
 
         使用方法: /rss add <RSS地址> [订阅名称]
-        批量添加: /rss add <URL1> <URL2> <URL3> ...
+        批量添加: /rss add <URL1> <URL2> <URL3> ... (最多10个)
         如果不提供名称，会自动从RSS feed中获取
         """
-        if not url:
+        # 收集所有非空URL参数
+        all_urls = [url1, url2, url3, url4, url5, url6, url7, url8, url9, url10]
+        urls = [u for u in all_urls if u]
+        
+        if not urls:
             yield event.plain_result(
                 "📝 使用方法：\n"
                 "/rss add <RSS地址> [订阅名称]\n\n"
@@ -232,7 +240,7 @@ class RSSPushPlugin(star.Star):
                 "/rss add https://rsshub.app/bilibili/user/video/2\n"
                 "/rss add https://rsshub.app/bilibili/user/video/2 B站UP主\n\n"
                 "📦 批量添加：\n"
-                "/rss add <URL1> <URL2> <URL3> ...\n\n"
+                "/rss add <URL1> <URL2> <URL3> ... (最多10个)\n\n"
                 "示例：\n"
                 "/rss add https://rsshub.app/bilibili/user/video/1 https://rsshub.app/bilibili/user/video/2\n\n"
                 "💡 提示：\n"
@@ -242,54 +250,48 @@ class RSSPushPlugin(star.Star):
             )
             return
 
-        # 检测是否为批量添加（包含多个URL）
-        # 将url和name合并，然后识别所有URL
-        full_text = f"{url} {name}".strip()
-        
-        # 使用正则表达式提取所有URL（http/https开头或/开头的RSSHub路由）
-        import re
-        url_pattern = r'(https?://[^\s]+|/[^\s]+)'
-        urls = re.findall(url_pattern, full_text)
-        
-        if not urls:
-            yield event.plain_result("❌ 未识别到有效的URL")
-            return
-        
-        # 如果只有一个URL且提供了名称，使用原逻辑
-        if len(urls) == 1 and name and not re.match(url_pattern, name):
-            url_to_add = urls[0]
-            custom_name = name
+        # 如果只有一个URL，检查第二个参数是否为自定义名称
+        # （第二个参数不是URL时，视为名称）
+        if len(urls) == 1:
+            custom_name = ""
+            # 检查url2是否为名称而不是URL
+            if url2 and not (url2.startswith('http://') or url2.startswith('https://') or url2.startswith('/')):
+                custom_name = url2
             
-            # 处理RSSHub路由快捷方式
-            if url_to_add.startswith("/"):
-                rsshub_config = self.plugin_config.get("rsshub", {})
-                rsshub_instance = rsshub_config.get(
-                    "default_instance", "https://rsshub.app"
+            if custom_name:
+                # 单个添加，带自定义名称
+                url_to_add = urls[0]
+                
+                # 处理RSSHub路由快捷方式
+                if url_to_add.startswith("/"):
+                    rsshub_config = self.plugin_config.get("rsshub", {})
+                    rsshub_instance = rsshub_config.get(
+                        "default_instance", "https://rsshub.app"
+                    )
+                    url_to_add = rsshub_instance + url_to_add
+                    logger.info(f"RSSHub路由转换为完整URL: {url_to_add}")
+                
+                # 默认推送到当前会话
+                target = Target(
+                    type="group" if not event.is_private_chat() else "private",
+                    platform=event.get_platform_name(),
+                    id=event.unified_msg_origin,
                 )
-                url_to_add = rsshub_instance + url_to_add
-                logger.info(f"RSSHub路由转换为完整URL: {url_to_add}")
-            
-            # 默认推送到当前会话
-            target = Target(
-                type="group" if not event.is_private_chat() else "private",
-                platform=event.get_platform_name(),
-                id=event.unified_msg_origin,
-            )
-            
-            try:
-                sub = self.sub_manager.add(custom_name, url_to_add, [target])
-                msg = "✅ 订阅添加成功！\n\n"
-                msg += "📋 订阅信息：\n"
-                msg += f"  ID: {sub.id[:8]}...\n"
-                msg += f"  名称: {sub.name}\n"
-                msg += f"  地址: {sub.url}\n"
-                msg += "  推送到: 当前会话\n"
-                msg += f"  状态: {'✅ 已启用' if sub.enabled else '❌ 已禁用'}"
-                yield event.plain_result(msg)
-            except Exception as e:
-                logger.error(f"添加订阅失败: {e}")
-                yield event.plain_result(f"❌ 添加订阅失败: {str(e)}")
-            return
+                
+                try:
+                    sub = self.sub_manager.add(custom_name, url_to_add, [target])
+                    msg = "✅ 订阅添加成功！\n\n"
+                    msg += "📋 订阅信息：\n"
+                    msg += f"  ID: {sub.id[:8]}...\n"
+                    msg += f"  名称: {sub.name}\n"
+                    msg += f"  地址: {sub.url}\n"
+                    msg += "  推送到: 当前会话\n"
+                    msg += f"  状态: {'✅ 已启用' if sub.enabled else '❌ 已禁用'}"
+                    yield event.plain_result(msg)
+                except Exception as e:
+                    logger.error(f"添加订阅失败: {e}")
+                    yield event.plain_result(f"❌ 添加订阅失败: {str(e)}")
+                return
         
         # 批量添加模式
         yield event.plain_result(f"🔄 开始批量添加 {len(urls)} 个订阅...")
@@ -351,6 +353,7 @@ class RSSPushPlugin(star.Star):
         msg += "\n".join(results)
         
         yield event.plain_result(msg)
+
 
 
     @filter.permission_type(filter.PermissionType.ADMIN)

@@ -92,7 +92,7 @@ class RSSPushPlugin(star.Star):
                 self.storage,
                 polling_interval,
             )
-            self.scheduler.start()
+            await self.scheduler.start()
             logger.info(f"RSS调度器已启动，轮询间隔: {polling_interval} 分钟")
         else:
             logger.info("RSS轮询已禁用（可在WebUI配置中启用）")

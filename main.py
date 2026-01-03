@@ -407,12 +407,7 @@ class RSSPushPlugin(star.Star):
             target_count = len(sub.targets)
             msg += f"{i}. {status} {sub.name}\n"
             msg += f"   ID: {sub.id[:8]}...\n"
-            msg += f"   推送: {target_count} 个目标\n"
-
-            # 显示统计信息
-            if sub.stats.total_pushes > 0:
-                msg += f"   推送: {sub.stats.total_pushes} 次\n"
-
+            msg += f"   目标: {target_count} 个会话\n"
             msg += "\n"
 
         msg += "💡 使用 /rss info <ID> 查看详情"
@@ -421,44 +416,30 @@ class RSSPushPlugin(star.Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("rss info")
     async def rss_info(self, event: AstrMessageEvent, sub_id: str = ""):
-        """查看订阅详情
-
-        使用方法: /rss info <订阅ID>
-        """
+        """查看订阅详情"""
         if not sub_id:
             yield event.plain_result("请指定订阅ID\n\n使用 /rss list 查看所有订阅")
             return
 
-        sub = self.sub_manager.get(sub_id)
+        sub = self.sub_manager.get(sub_id) or self.sub_manager.get_by_name(sub_id)
         if not sub:
             yield event.plain_result(f"❌ 未找到订阅: {sub_id}")
             return
 
-        msg = "📋 订阅详情\n\n"
+        msg = f"📋 订阅详情: {sub.name}\n\n"
         msg += f"ID: {sub.id}\n"
-        msg += f"名称: {sub.name}\n"
+        msg += f"状态: {'✅ 已开启' if sub.enabled else '❌ 已关闭'}\n"
         msg += f"地址: {sub.url}\n"
-        msg += f"状态: {'✅ 已启用' if sub.enabled else '❌ 已禁用'}\n"
-        msg += f"创建时间: {sub.created_at.strftime('%Y-%m-%d %H:%M')}\n"
+        
+        if sub.last_pub_date:
+            msg += f"动态基准: {sub.last_pub_date.strftime('%Y-%m-%d %H:%M')}\n"
 
-        if sub.last_check:
-            msg += f"最后检查: {sub.last_check.strftime('%Y-%m-%d %H:%M')}\n"
-
-        if sub.last_push:
-            msg += f"最后推送: {sub.last_push.strftime('%Y-%m-%d %H:%M')}\n"
-
-        msg += "\n📊 统计信息:\n"
-        msg += f"  检查次数: {sub.stats.total_checks}\n"
-        msg += f"  成功检查: {sub.stats.success_checks}\n"
-        msg += f"  推送次数: {sub.stats.total_pushes}\n"
-        msg += f"  成功推送: {sub.stats.success_pushes}\n"
-
-        if sub.stats.last_error:
-            msg += f"\n⚠️ 最后错误: {sub.stats.last_error}\n"
+        if sub.last_error:
+            msg += f"\n⚠️ 最后错误: {sub.last_error}\n"
 
         msg += f"\n🎯 推送目标 ({len(sub.targets)} 个):\n"
-        for target in sub.targets:
-            msg += f"  - {target.type} @ {target.platform}: {target.id}\n"
+        for i, target in enumerate(sub.targets, 1):
+            msg += f"  {i}. {target.type} @ {target.platform}: {target.id}\n"
 
         yield event.plain_result(msg)
 
@@ -703,154 +684,30 @@ class RSSPushPlugin(star.Star):
             return
 
         if sub_id.lower() == "all":
-            yield event.plain_result("🔄 正在检查所有订阅...\n请稍候...")
+            yield event.plain_result("🔄 正在检查所有订阅...")
             try:
                 if self.scheduler:
-                    # 记录执行前的推送次数
-                    enabled_subs = self.sub_manager.list_enabled()
-                    push_counts_before = {sub.id: sub.stats.total_pushes for sub in enabled_subs}
-                    
                     await self.scheduler.check_all_subscriptions()
-                    
-                    # 计算推送统计
-                    total_new_pushes = 0
-                    pushed_subs = []
-                    for sub in self.sub_manager.list_enabled():
-                        new_pushes = sub.stats.total_pushes - push_counts_before.get(sub.id, 0)
-                        if new_pushes > 0:
-                            total_new_pushes += new_pushes
-                            pushed_subs.append(f"{sub.name} ({new_pushes}条)")
-                    
-                    # 构建结果消息
-                    msg = "✅ 检查完成\n\n"
-                    msg += f"📊 检查结果：\n"
-                    msg += f"  检查订阅数：{len(enabled_subs)} 个\n"
-                    msg += f"  新推送：{total_new_pushes} 条\n"
-                    
-                    if pushed_subs:
-                        msg += f"\n📤 已推送：\n"
-                        for sub_info in pushed_subs[:5]:  # 最多显示5个
-                            msg += f"  • {sub_info}\n"
-                        if len(pushed_subs) > 5:
-                            msg += f"  ...及其他 {len(pushed_subs) - 5} 个订阅\n"
-                    else:
-                        msg += "\n💭 所有订阅均无新内容"
-                    
-                    yield event.plain_result(msg)
+                    yield event.plain_result("✅ 所有订阅检查完成")
                 else:
                     yield event.plain_result("❌ 调度器未启动")
             except Exception as e:
-                logger.error(f"检查所有订阅失败: {e}")
                 yield event.plain_result(f"❌ 检查失败: {str(e)}")
         else:
-            sub = self.sub_manager.get(sub_id)
+            sub = self.sub_manager.get(sub_id) or self.sub_manager.get_by_name(sub_id)
             if not sub:
                 yield event.plain_result(f"❌ 未找到订阅: {sub_id}")
                 return
 
-            yield event.plain_result(f"🔄 正在检查订阅: {sub.name}\n请稍候...")
-
+            yield event.plain_result(f"🔄 正在检查: {sub.name}...")
             try:
                 if self.scheduler:
-                    # 记录执行前的推送次数
-                    push_count_before = sub.stats.total_pushes
-                    
                     await self.scheduler.check_subscription(sub)
-                    
-                    # 计算新推送
-                    new_pushes = sub.stats.total_pushes - push_count_before
-                    
-                    # 重新获取最新数据
-                    sub = self.sub_manager.get(sub_id)
-                    
-                    msg = "✅ 检查完成\n\n"
-                    if sub:
-                        msg += f"📊 订阅：{sub.name}\n"
-                        if new_pushes > 0:
-                            msg += f"📤 新推送：{new_pushes} 条"
-                        else:
-                            msg += "💭 暂无新内容"
-                        
-                        if sub.last_check:
-                            msg += f"\n⏰ 检查时间：{sub.last_check.strftime('%H:%M')}"
-                    else:
-                        msg += "⚠️ 订阅信息获取失败"
-                    
-                    yield event.plain_result(msg)
+                    yield event.plain_result(f"✅ {sub.name} 检查完成")
                 else:
                     yield event.plain_result("❌ 调度器未启动")
             except Exception as e:
-                logger.error(f"检查订阅失败: {e}")
                 yield event.plain_result(f"❌ 检查失败: {str(e)}")
-
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("rss stats")
-    async def rss_stats(self, event: AstrMessageEvent, sub_id: str = ""):
-        """查看推送统计
-
-        使用方法: /rss stats [订阅ID]
-        """
-        if sub_id:
-            # 显示单个订阅的统计
-            sub = self.sub_manager.get(sub_id)
-            if not sub:
-                yield event.plain_result(f"❌ 未找到订阅: {sub_id}")
-                return
-
-            msg = f"📊 订阅统计: {sub.name}\n\n"
-            msg += "🔍 检查统计:\n"
-            msg += f"  总检查次数: {sub.stats.total_checks}\n"
-            msg += f"  成功次数: {sub.stats.success_checks}\n"
-            if sub.stats.total_checks > 0:
-                success_rate = (sub.stats.success_checks / sub.stats.total_checks) * 100
-                msg += f"  成功率: {success_rate:.1f}%\n"
-
-            msg += "\n📤 推送统计:\n"
-            msg += f"  总推送次数: {sub.stats.total_pushes}\n"
-            msg += f"  成功次数: {sub.stats.success_pushes}\n"
-            if sub.stats.total_pushes > 0:
-                push_rate = (sub.stats.success_pushes / sub.stats.total_pushes) * 100
-                msg += f"  成功率: {push_rate:.1f}%\n"
-
-            if sub.last_check:
-                msg += f"\n⏰ 最后检查: {sub.last_check.strftime('%Y-%m-%d %H:%M')}\n"
-            if sub.last_push:
-                msg += f"⏰ 最后推送: {sub.last_push.strftime('%Y-%m-%d %H:%M')}\n"
-
-            if sub.stats.last_error:
-                msg += f"\n⚠️ 最后错误: {sub.stats.last_error}\n"
-
-            yield event.plain_result(msg)
-        else:
-            # 显示全局统计
-            all_subs = self.sub_manager.list_all()
-            enabled_subs = self.sub_manager.list_enabled()
-
-            total_checks = sum(sub.stats.total_checks for sub in all_subs)
-            total_pushes = sum(sub.stats.total_pushes for sub in all_subs)
-
-            msg = "📊 RSS推送全局统计\n\n"
-            msg += "📋 订阅统计:\n"
-            msg += f"  总订阅数: {len(all_subs)}\n"
-            msg += f"  已启用: {len(enabled_subs)}\n"
-            msg += f"  已禁用: {len(all_subs) - len(enabled_subs)}\n"
-
-            msg += "\n🔍 检查统计:\n"
-            msg += f"  总检查次数: {total_checks}\n"
-
-            msg += "\n📤 推送统计:\n"
-            msg += f"  总推送次数: {total_pushes}\n"
-
-            # 找出最活跃的订阅
-            if all_subs:
-                most_active = max(all_subs, key=lambda s: s.stats.total_pushes)
-                if most_active.stats.total_pushes > 0:
-                    msg += "\n🏆 最活跃订阅:\n"
-                    msg += f"  {most_active.name} ({most_active.stats.total_pushes}次推送)\n"
-
-            msg += "\n💡 使用 /rss stats <ID> 查看单个订阅统计"
-
-            yield event.plain_result(msg)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("rss help")
@@ -873,15 +730,10 @@ class RSSPushPlugin(star.Star):
 
 🔧 运行控制:
 /rss test <ID> - 手动测试一条推送
-/rss update <ID> - 立即检查更新 (update all 为检查所有)
-
-📊 其他:
-/rss stats [ID] - 查看推送统计信息
+/rss update <ID> - 立即检查更新 (all 为检查所有)
 /rss help - 显示此帮助内容
 
-💡 提示：
-- 订阅ID支持部分匹配（如前3位）
-"""
+💡 提示：订阅ID支持前缀匹配（如前3位）"""
         yield event.plain_result(msg)
 
     async def terminate(self):

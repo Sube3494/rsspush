@@ -64,45 +64,28 @@ class Pusher:
 
                     # 提取图片URL
                     all_images = item.get("images", [])
-                    if all_images:
-                        logger.debug(f"🖼️ 条目[{index+1}]包含 {len(all_images)} 张图片")
-
                     images = all_images[:max_images] if max_images > 0 else []
 
                     # 并发推送到所有目标
                     target_tasks = []
                     for target in sub.targets:
-                        task = self._send_to_target_with_semaphore(
-                            target, message, images, targets_semaphore
+                        target_tasks.append(
+                            self._send_to_target_with_semaphore(
+                                target, message, images, targets_semaphore
+                            )
                         )
-                        target_tasks.append(task)
 
                     # 等待所有目标推送完成
                     results = await asyncio.gather(*target_tasks, return_exceptions=True)
                     
-                    # 检查是否有失败
+                    # 统计是否有成功
                     failed_count = sum(1 for r in results if isinstance(r, Exception))
                     success_count = len(results) - failed_count
 
-                    if failed_count > 0:
-                        logger.warning(
-                            f"条目[{index+1}]推送部分失败: "
-                            f"成功 {success_count}/{len(results)} 个目标"
-                        )
-                        # 如果所有目标都失败，才记录为失败
-                        if success_count == 0:
-                            raise Exception(f"所有目标推送失败")
-                    else:
-                        logger.info(
-                            f"✅ 条目[{index+1}]推送成功: "
-                            f"{item['title'][:30]}... ({success_count}个目标)"
-                        )
+                    if success_count == 0 and len(results) > 0:
+                        raise Exception("所有目标推送失败")
 
-                    # 更新统计
-                    sub.stats.total_pushes += 1
-                    if success_count > 0:
-                        sub.stats.success_pushes += 1
-                    sub.last_push = datetime.now()
+                    logger.info(f"✅ 条目[{index+1}]推送完成: {item['title'][:30]}... ({success_count}成功)")
 
                     # 如果不是最后一个条目，添加间隔（避免API限流）
                     if index < len(items) - 1:
@@ -110,28 +93,11 @@ class Pusher:
 
                 except Exception as e:
                     logger.error(f"❌ 推送条目[{index+1}]失败: {sub.name} - {e}")
-                    sub.stats.last_error = str(e)
                     raise
 
         # 并发推送所有条目
-        tasks = [
-            push_single_item(item, i) for i, item in enumerate(items)
-        ]
-        
-        # 等待所有推送完成
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # 统计结果
-        success_count = sum(1 for r in results if not isinstance(r, Exception))
-        failed_count = len(results) - success_count
-        
-        if failed_count > 0:
-            logger.warning(
-                f"推送完成: 成功 {success_count}/{len(items)} 个条目, "
-                f"失败 {failed_count} 个条目"
-            )
-        else:
-            logger.info(f"✅ 所有 {len(items)} 个条目推送完成")
+        tasks = [push_single_item(item, i) for i, item in enumerate(items)]
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _send_to_target_with_semaphore(
         self,
@@ -145,170 +111,91 @@ class Pusher:
             return await self._send_to_target(target, message, images)
 
     def _format_message(self, sub: Subscription, item: dict) -> str:
-        """格式化消息（使用内容处理器）
-
-        Args:
-            sub: 订阅对象
-            item: RSS条目
-
-        Returns:
-            格式化后的消息
-        """
-        # 使用内容处理器工厂获取合适的处理器
+        """格式化消息"""
         from ..utils.content_processor import ContentProcessorFactory
         
         factory = ContentProcessorFactory()
         processor = factory.get_processor(sub.url)
-        
-        # 处理内容
         processed = processor.process(item, self.config)
         
-        # 优先使用订阅的自定义模板，其次使用配置的默认模板
         template = sub.template
         if not template:
-            template_config = self.config.get("template", {})
-            template = template_config.get("default")
+            template = self.config.get("template", {}).get("default")
         
-        # 如果有模板配置，使用模板格式化
         if template:
             try:
                 from ..utils.formatter import MessageFormatter
-                
-                # 处理时间（已经是本地时间）
                 pub_date_str = ""
                 if item.get("pubDate") and isinstance(item["pubDate"], datetime):
                     pub_date_str = item["pubDate"].strftime("%Y-%m-%d %H:%M")
                 
-                # 准备模板参数（使用处理器处理后的数据）
                 template_item = {
                     "title": item.get("title", "").strip(),
                     "display_title": processed.get("display_title", ""),
                     "link": item.get("link", ""),
-                    "description": item.get("description", ""),  # 原始描述
-                    "clean_description": processed.get("clean_description", ""),  # 清理后的描述
-                    "video_url": processed.get("video_url", ""),  # 视频链接
-                    "extra_links": processed.get("extra_links", {}),  # 额外链接
+                    "description": item.get("description", ""),
+                    "clean_description": processed.get("clean_description", ""),
+                    "video_url": processed.get("video_url", ""),
+                    "extra_links": processed.get("extra_links", {}),
                     "author": item.get("author", ""),
                     "pubDate": pub_date_str,
                     "guid": item.get("guid", ""),
                 }
-                
-                formatter = MessageFormatter(template)
-                return formatter.format(sub.name, template_item)
+                return MessageFormatter(template).format(sub.name, template_item)
             except Exception as e:
-                logger.warning(f"使用模板格式化失败: {e}，降级为默认格式")
+                logger.warning(f"模板格式化失败: {e}，将使用内置格式")
         
-        # 没有模板配置或格式化失败，使用内置简化格式
         return self._format_message_builtin(sub, item, processed)
     
     def _format_message_builtin(self, sub: Subscription, item: dict, processed: dict) -> str:
-        """内置简化格式（无需模板配置）
-        
-        Args:
-            sub: 订阅对象
-            item: RSS条目
-            processed: 内容处理器处理后的数据
-        
-        Returns:
-            格式化后的消息
-        """
-        # 准备数据
+        """内置简化格式"""
         title = item.get("title", "").strip()
         link = item.get("link", "").strip()
         author = item.get("author", "").strip()
-        
-        # 处理时间（已经是本地时间）
         pub_date_str = ""
         if item.get("pubDate") and isinstance(item["pubDate"], datetime):
             pub_date_str = item["pubDate"].strftime("%Y-%m-%d %H:%M")
 
-        # 使用处理器处理后的数据
         clean_desc = processed.get("clean_description", "")
         video_url = processed.get("video_url", "")
         extra_links = processed.get("extra_links", {})
         
-        # 构建消息（优化格式）
-        msg_parts = []
-        
-        # 订阅名称
-        msg_parts.append(f"【{sub.name}】")
-        
-        # 描述（作为主要内容）
+        msg_parts = [f"【{sub.name}】"]
         if clean_desc:
-            msg_parts.append("")  # 空行
-            msg_parts.append(f"📝 {clean_desc}")
-        
-        # 视频链接（如果有）
+            msg_parts.append(f"\n📝 {clean_desc}")
         if video_url:
-            msg_parts.append("")  # 空行
-            msg_parts.append(f"🎬 视频：{video_url}")
-        
-        # 额外链接（如图文链接）
+            msg_parts.append(f"\n🎬 视频：{video_url}")
         if extra_links.get('opus'):
             msg_parts.append(f"📄 图文：{extra_links['opus']}")
         
-        # 元信息行（时间和作者）
         if pub_date_str or author:
-            msg_parts.append("")  # 空行
-            meta_parts = []
-            if pub_date_str:
-                meta_parts.append(f"⏱️ {pub_date_str}")
-            if author:
-                meta_parts.append(f"👤 {author}")
-            msg_parts.append(" | ".join(meta_parts))
+            meta = []
+            if pub_date_str: meta.append(f"⏱️ {pub_date_str}")
+            if author: meta.append(f"👤 {author}")
+            msg_parts.append("\n" + " | ".join(meta))
         
-        # 动态链接
         if link:
-            msg_parts.append(f"🔗 动态地址：{link}")
+            msg_parts.append(f"🔗 地址：{link}")
         
-        # 组合消息
-        msg = "\n".join(msg_parts)
-        
-        return msg.strip()
+        return "\n".join(msg_parts).strip()
 
-    async def _send_to_target(
-        self, target: Target, message: str, images: list[str] = []
-    ):
-        """发送消息到目标
-
-        Args:
-            target: 推送目标
-            message: 消息内容
-            images: 图片URL列表
-        """
+    async def _send_to_target(self, target: Target, message: str, images: list[str] = []):
+        """发送消息到远端"""
         try:
             from astrbot.api.event import MessageChain
             from astrbot.api.message_components import Image
 
-            # 构造消息链（使用 .message() 方法）
             message_chain = MessageChain().message(message)
-
-            # 添加图片
             if images:
                 for img_url in images:
                     try:
-                        # 使用 Image.fromURL 创建图片组件
-                        img_component = Image.fromURL(img_url)
-                        message_chain.chain.append(img_component)
-                        logger.info(f"🖼️ 添加图片: {img_url[:50]}...")
-                    except Exception as e:
-                        logger.warning(f"⚠️ 添加图片失败: {e}")
+                        message_chain.chain.append(Image.fromURL(img_url))
+                    except: pass
 
-            # target.id 已经是完整的 session 字符串（platform:MessageType:id）
-            # 例如: aiocqhttp:GroupMessage:123456
             session_str = target.id
-
-            logger.info(f"📤 发送消息到 {session_str}")
-
-            # 使用context发送消息
             success = await self.context.send_message(session_str, message_chain)
-
-            if success:
-                logger.info("✅ 消息发送成功")
-            else:
-                logger.warning("⚠️ 未找到匹配的平台或会话")
-                raise Exception("消息发送失败：未找到匹配的平台")
-
+            if not success:
+                raise Exception("未找到匹配的会话或平台")
         except Exception as e:
-            logger.error(f"❌ 发送消息失败: {e}")
+            logger.error(f"❌ 发送失败: {e}")
             raise

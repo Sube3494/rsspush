@@ -128,7 +128,7 @@ class RSSScheduler:
             logger.error(f"启动调度器失败: {e}")
 
     async def check_all_subscriptions(self):
-        """检查所有启用的订阅"""
+        """检查所有启启用用的订阅"""
         logger.info("开始检查所有RSS订阅...")
 
         enabled_subs = self.sub_manager.list_enabled()
@@ -138,27 +138,20 @@ class RSSScheduler:
             try:
                 await self.check_subscription(sub)
             except Exception as e:
-                logger.error(f"检查订阅失败 {sub.name}: {e}")
-                sub.stats.last_error = str(e)
+                logger.error(f"检查订阅期内异常 {sub.name}: {e}")
+                sub.last_error = str(e)
                 self.sub_manager.update_subscription(sub)
 
     async def check_subscription(self, sub):
-        """检查单个订阅
-        基于 pubDate 基准线进行过滤和推送。
-        """
+        """检查单个订阅"""
         logger.info(f"检查订阅: {sub.name}")
-
-        # 更新检查统计
-        sub.stats.total_checks += 1
-        sub.last_check = datetime.now()
 
         try:
             # 获取RSS内容
             feed_data = await self.fetcher.fetch_with_retry(sub.url)
 
             if not feed_data:
-                logger.warning(f"获取RSS失败: {sub.name}")
-                self.sub_manager.update_subscription(sub)
+                logger.warning(f"获取RSS失败: {sub.url}")
                 return
 
             # 解析条目
@@ -167,90 +160,60 @@ class RSSScheduler:
             entries = await loop.run_in_executor(None, self.parser.parse_entries, feed_data)
 
             if not entries:
-                logger.info(f"订阅无内容: {sub.name}")
-                sub.stats.success_checks += 1
-                self.sub_manager.update_subscription(sub)
                 return
 
-            # 过滤掉没有发布时间的条目（无法作为基准比较）
+            # 过滤掉没有发布时间的条目
             valid_entries = [e for e in entries if e.get("pubDate")]
             if not valid_entries:
-                logger.warning(f"订阅内容均无发布时间，跳过: {sub.name}")
-                sub.stats.success_checks += 1
-                self.sub_manager.update_subscription(sub)
                 return
 
-            # 按发布时间从旧到新排序（方便顺序推送和更新基准）
+            # 按发布时间由旧到新排序
             valid_entries.sort(key=lambda x: x["pubDate"])
 
             to_push = []
             
             # 确定基准线 (Baseline)
-            # 优先从 sub 对象获取，如果没有则尝试从数据库旧记录获取（兼容性）
             baseline = sub.last_pub_date
-            if baseline is None:
-                # 尝试从推送历史中找最后一条的时间
-                baseline = self.storage.get_last_pushed_pub_date(sub.id)
-                logger.info(f"子项无基准线，从存储获取历史基准: {baseline}")
 
             if baseline is None:
-                # 情况1: 冷启动 (Cold Start)
-                # 数据库完全没有该订阅的推送记录，只推最新的一条来确立基准线
+                # 冷启动: 仅推送最新一条
                 latest_entry = valid_entries[-1]
-                logger.info(f"冷启动: 仅推送最新一条作为基准: {latest_entry.get('title')}")
+                logger.info(f"冷启动: {sub.name} -> {latest_entry.get('title')}")
                 to_push = [latest_entry]
             else:
-                # 情况2: 增量更新 (Catch-up)
-                # 筛选所有晚于基准线的动态
+                # 增量推送
                 for entry in valid_entries:
                     if entry["pubDate"] > baseline:
-                        # 虽然时间已经比基准晚，但多加一层 GUID 校验以防万一（处理重复时间戳）
                         guid = entry.get("guid")
                         if guid and not self.storage.is_pushed(str(guid), sub.id):
                             to_push.append(entry)
                 
-                logger.info(f"增量更新: 发现 {len(to_push)} 条新动态 (基准: {baseline})")
+                if to_push:
+                    logger.info(f"发现新动态: {sub.name} ({len(to_push)}条)")
 
             if not to_push:
-                logger.info(f"没有新内容需要推送: {sub.name}")
-                sub.stats.success_checks += 1
-                self.sub_manager.update_subscription(sub)
                 return
 
-            # 限制单次推送数量，避免刷屏 (默认最多10条)
+            # 限制单次推送数量
             max_limit = 10
             if len(to_push) > max_limit:
-                logger.warning(f"待推送动态过多({len(to_push)})，截断为最新的 {max_limit} 条")
                 to_push = to_push[-max_limit:]
 
             # 执行推送
-            # 注意：pusher.push 会根据 items 顺序推送。由于 to_push 是按时间由旧到新排序，
-            # 这里正好符合“顺序推送”的诉求。
             await self.pusher.push(sub, to_push)
 
-            # 推送成功后的清理与更新
-            sub.stats.success_checks += 1
+            # 推送成功后更新状态
+            sub.last_pub_date = to_push[-1]["pubDate"]
+            sub.last_error = None  # 运行成功，清除错误信息
             
-            # 使用最后一条推送动态的发布时间作为新的基准线
-            new_baseline = to_push[-1]["pubDate"]
-            sub.last_pub_date = new_baseline
-            
-            # 记录 GUID 到数据库以便查重
-            target_ids = [t.id for t in sub.targets]
             for entry in to_push:
-                self.storage.mark_pushed(
-                    entry["guid"], 
-                    sub.id, 
-                    target_ids,
-                    entry["pubDate"]
-                )
+                self.storage.mark_pushed(entry["guid"], sub.id, entry["pubDate"])
 
             self.sub_manager.update_subscription(sub)
-            logger.info(f"订阅检查完成并更新基准: {sub.name} -> {new_baseline}")
 
         except Exception as e:
             logger.error(f"检查订阅异常 {sub.name}: {e}")
-            sub.stats.last_error = str(e)
+            sub.last_error = str(e)
             self.sub_manager.update_subscription(sub)
 
     def stop(self):

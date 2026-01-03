@@ -137,18 +137,16 @@ class RSSScheduler:
 
     async def check_subscription(self, sub):
         """检查单个订阅
-
-        Args:
-            sub: 订阅对象
+        基于 pubDate 基准线进行过滤和推送。
         """
         logger.info(f"检查订阅: {sub.name}")
 
-        # 更新统计
+        # 更新检查统计
         sub.stats.total_checks += 1
         sub.last_check = datetime.now()
 
         try:
-            # 获取RSS内容（带重试）
+            # 获取RSS内容
             feed_data = await self.fetcher.fetch_with_retry(sub.url)
 
             if not feed_data:
@@ -156,133 +154,96 @@ class RSSScheduler:
                 self.sub_manager.update_subscription(sub)
                 return
 
-            # 解析条目 (在线程池中运行)
+            # 解析条目
             import asyncio
             loop = asyncio.get_event_loop()
             entries = await loop.run_in_executor(None, self.parser.parse_entries, feed_data)
 
             if not entries:
-                logger.info(f"订阅无新内容: {sub.name}")
+                logger.info(f"订阅无内容: {sub.name}")
                 sub.stats.success_checks += 1
                 self.sub_manager.update_subscription(sub)
                 return
 
-            logger.info(f"解析到 {len(entries)} 个条目: {sub.name}")
+            # 过滤掉没有发布时间的条目（无法作为基准比较）
+            valid_entries = [e for e in entries if e.get("pubDate")]
+            if not valid_entries:
+                logger.warning(f"订阅内容均无发布时间，跳过: {sub.name}")
+                sub.stats.success_checks += 1
+                self.sub_manager.update_subscription(sub)
+                return
 
-            # 按发布时间排序（最新的在前）
-            entries.sort(
-                key=lambda x: x["pubDate"] if x.get("pubDate") else datetime.min,
-                reverse=True,  # 最新的在前
-            )
+            # 按发布时间从旧到新排序（方便顺序推送和更新基准）
+            valid_entries.sort(key=lambda x: x["pubDate"])
 
-            # 直接从数据库获取最后推送动态的发布时间
-            last_pushed_pub_date = self.storage.get_last_pushed_pub_date(sub.id)
+            to_push = []
             
-            # 筛选需要推送的条目
-            newer_entries = []
-            pushed_count = 0
-            no_date_count = 0
-            
-            for entry in entries:
-                guid = entry.get("guid", "")
-                if not guid:
-                    logger.warning(f"条目缺少GUID，跳过: {entry.get('title', 'Unknown')[:50]}")
-                    continue
+            # 确定基准线 (Baseline)
+            # 优先从 sub 对象获取，如果没有则尝试从数据库旧记录获取（兼容性）
+            baseline = sub.last_pub_date
+            if baseline is None:
+                # 尝试从推送历史中找最后一条的时间
+                baseline = self.storage.get_last_pushed_pub_date(sub.id)
+                logger.info(f"子项无基准线，从存储获取历史基准: {baseline}")
+
+            if baseline is None:
+                # 情况1: 冷启动 (Cold Start)
+                # 数据库完全没有该订阅的推送记录，只推最新的一条来确立基准线
+                latest_entry = valid_entries[-1]
+                logger.info(f"冷启动: 仅推送最新一条作为基准: {latest_entry.get('title')}")
+                to_push = [latest_entry]
+            else:
+                # 情况2: 增量更新 (Catch-up)
+                # 筛选所有晚于基准线的动态
+                for entry in valid_entries:
+                    if entry["pubDate"] > baseline:
+                        # 虽然时间已经比基准晚，但多加一层 GUID 校验以防万一（处理重复时间戳）
+                        if not self.storage.is_pushed(entry.get("guid"), sub.id):
+                            to_push.append(entry)
                 
-                entry_time = entry.get("pubDate")
-                if not entry_time:
-                    # 没有时间的条目，跳过（无法判断顺序）
-                    no_date_count += 1
-                    continue
-                
-                # 检查是否已推送
-                if self.storage.is_pushed(guid, sub.id):
-                    pushed_count += 1
-                    continue
-                
-                # 第一次推送：只推送最新的一条
-                if last_pushed_pub_date is None:
-                    newer_entries.append(entry)
-                    break  # 只取第一条（最新的）
-                
-                # 推送所有比最后推送时间新的条目
-                if entry_time > last_pushed_pub_date:
-                    newer_entries.append(entry)
-            
-            logger.info(
-                f"条目统计: 总计 {len(entries)} 条, "
-                f"已推送 {pushed_count} 条, "
-                f"无时间 {no_date_count} 条, "
-                f"待推送 {len(newer_entries)} 条"
-            )
-            
-            if not newer_entries:
+                logger.info(f"增量更新: 发现 {len(to_push)} 条新动态 (基准: {baseline})")
+
+            if not to_push:
                 logger.info(f"没有新内容需要推送: {sub.name}")
                 sub.stats.success_checks += 1
                 self.sub_manager.update_subscription(sub)
                 return
-            
-            # 确定要推送的条目
-            to_push = []
-            
-            if len(newer_entries) == 1:
-                # 只有一条新的，正常情况，只推送这一条
-                to_push = newer_entries
-                logger.info(
-                    f"正常推送最新 1 条: {sub.name} - {to_push[0].get('title', 'Unknown')[:50]}"
-                )
-            else:
-                # 有多条新的，说明服务中断导致漏推了
-                # 推送所有漏推的条目（按时间从旧到新排序）+ 最新的一条
-                # 先按时间从旧到新排序
-                newer_entries_sorted = sorted(
-                    newer_entries,
-                    key=lambda x: x.get("pubDate") or datetime.min,
-                    reverse=False,  # 从旧到新
-                )
-                
-                # 推送所有漏推的条目
-                to_push = newer_entries_sorted
-                
-                logger.info(
-                    f"检测到漏推，将推送 {len(to_push)} 条: "
-                    f"{len(newer_entries)-1} 个漏推 + 1 个最新"
-                )
-            
-            # 限制推送数量，避免一次性推送太多（最多20条）
-            max_push_limit = 20
-            if len(to_push) > max_push_limit:
-                logger.warning(
-                    f"推送条目过多 ({len(to_push)} 条)，"
-                    f"将只推送最新的 {max_push_limit} 条以避免刷屏"
-                )
-                # 保留最新的几条
-                to_push = to_push[-max_push_limit:]
 
-            # 推送
+            # 限制单次推送数量，避免刷屏 (默认最多10条)
+            max_limit = 10
+            if len(to_push) > max_limit:
+                logger.warning(f"待推送动态过多({len(to_push)})，截断为最新的 {max_limit} 条")
+                to_push = to_push[-max_limit:]
+
+            # 执行推送
+            # 注意：pusher.push 会根据 items 顺序推送。由于 to_push 是按时间由旧到新排序，
+            # 这里正好符合“顺序推送”的诉求。
             await self.pusher.push(sub, to_push)
 
-            # 标记为已推送（传递发布时间）
+            # 推送成功后的清理与更新
+            sub.stats.success_checks += 1
+            
+            # 使用最后一条推送动态的发布时间作为新的基准线
+            new_baseline = to_push[-1]["pubDate"]
+            sub.last_pub_date = new_baseline
+            
+            # 记录 GUID 到数据库以便查重
             target_ids = [t.id for t in sub.targets]
             for entry in to_push:
                 self.storage.mark_pushed(
                     entry["guid"], 
                     sub.id, 
                     target_ids,
-                    entry.get("pubDate")  # 传递动态的发布时间
+                    entry["pubDate"]
                 )
 
-            # 更新统计
-            sub.stats.success_checks += 1
             self.sub_manager.update_subscription(sub)
-
-            logger.info(f"订阅检查完成: {sub.name}")
+            logger.info(f"订阅检查完成并更新基准: {sub.name} -> {new_baseline}")
 
         except Exception as e:
             logger.error(f"检查订阅异常 {sub.name}: {e}")
             sub.stats.last_error = str(e)
             self.sub_manager.update_subscription(sub)
-            raise
 
     def stop(self):
         """停止调度器"""

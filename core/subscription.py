@@ -55,6 +55,7 @@ class Subscription:
     created_at: datetime = field(default_factory=datetime.now)
     last_check: datetime | None = None
     last_push: datetime | None = None
+    last_pub_date: datetime | None = None  # 最后一条推送动态的真实发布时间 (基准线)
     stats: SubscriptionStats = field(default_factory=SubscriptionStats)
 
     # P1功能字段
@@ -77,6 +78,7 @@ class Subscription:
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "last_check": self.last_check.isoformat() if self.last_check else None,
             "last_push": self.last_push.isoformat() if self.last_push else None,
+            "last_pub_date": self.last_pub_date.isoformat() if self.last_pub_date else None,
             "stats": self.stats.to_dict(),
             "template": self.template,
             "filters": self.filters,
@@ -104,6 +106,10 @@ class Subscription:
         if data.get("last_push"):
             last_push = datetime.fromisoformat(data["last_push"])
 
+        last_pub_date = None
+        if data.get("last_pub_date"):
+            last_pub_date = datetime.fromisoformat(data["last_pub_date"])
+
         return cls(
             id=data.get("id", str(uuid.uuid4())),
             name=data.get("name", ""),
@@ -113,6 +119,7 @@ class Subscription:
             created_at=created_at or datetime.now(),
             last_check=last_check,
             last_push=last_push,
+            last_pub_date=last_pub_date,
             stats=stats,
             template=data.get("template"),
             filters=data.get("filters", {}),

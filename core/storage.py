@@ -46,6 +46,7 @@ class Storage:
                 created_at TIMESTAMP,
                 last_check TIMESTAMP,
                 last_push TIMESTAMP,
+                last_pub_date TIMESTAMP,
                 total_checks INTEGER DEFAULT 0,
                 success_checks INTEGER DEFAULT 0,
                 total_pushes INTEGER DEFAULT 0,
@@ -59,7 +60,15 @@ class Storage:
             )
         """)
         
-        # 创建推送目标表
+        # 检查并迁移 subscriptions 表结构
+        cursor.execute("PRAGMA table_info(subscriptions)")
+        sub_columns = {col[1] for col in cursor.fetchall()}
+        if 'last_pub_date' not in sub_columns:
+            logger.info("检测到旧 subscriptions 表结构，正在添加 last_pub_date 列...")
+            cursor.execute("ALTER TABLE subscriptions ADD COLUMN last_pub_date TIMESTAMP")
+            logger.info("subscriptions 表升级完成")
+
+        # 检查并迁移推送目标表（如果不存在则创建）
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS targets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -173,7 +182,7 @@ class Storage:
             
             # 加载所有订阅
             cursor.execute("""
-                SELECT id, name, url, enabled, created_at, last_check, last_push,
+                SELECT id, name, url, enabled, created_at, last_check, last_push, last_pub_date,
                        total_checks, success_checks, total_pushes, success_pushes, last_error,
                        template, filters, max_items, priority, cron
                 FROM subscriptions
@@ -185,22 +194,23 @@ class Storage:
                 created_at = datetime.fromisoformat(row[4]) if row[4] else datetime.now()
                 last_check = datetime.fromisoformat(row[5]) if row[5] else None
                 last_push = datetime.fromisoformat(row[6]) if row[6] else None
+                last_pub_date = datetime.fromisoformat(row[7]) if row[7] else None
                 
                 # 解析 filters（JSON 字符串）
                 filters = {}
-                if row[13]:
+                if row[14]:
                     try:
-                        filters = json.loads(row[13])
+                        filters = json.loads(row[14])
                     except:
                         pass
                 
                 # 创建统计对象
                 stats = SubscriptionStats(
-                    total_checks=row[7],
-                    success_checks=row[8],
-                    total_pushes=row[9],
-                    success_pushes=row[10],
-                    last_error=row[11]
+                    total_checks=row[8],
+                    success_checks=row[9],
+                    total_pushes=row[10],
+                    success_pushes=row[11],
+                    last_error=row[12]
                 )
                 
                 # 加载推送目标
@@ -223,13 +233,14 @@ class Storage:
                     created_at=created_at,
                     last_check=last_check,
                     last_push=last_push,
+                    last_pub_date=last_pub_date,
                     stats=stats,
                     targets=targets,
-                    template=row[12],
+                    template=row[13],
                     filters=filters,
-                    max_items=row[14],
-                    priority=row[15],
-                    cron=row[16]
+                    max_items=row[15],
+                    priority=row[16],
+                    cron=row[17]
                 )
                 subscriptions.append(sub)
             
@@ -259,10 +270,10 @@ class Storage:
                 # 插入订阅
                 cursor.execute("""
                     INSERT INTO subscriptions 
-                    (id, name, url, enabled, created_at, last_check, last_push,
+                    (id, name, url, enabled, created_at, last_check, last_push, last_pub_date,
                      total_checks, success_checks, total_pushes, success_pushes, last_error,
                      template, filters, max_items, priority, cron)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     sub.id,
                     sub.name,
@@ -271,6 +282,7 @@ class Storage:
                     sub.created_at.isoformat() if sub.created_at else None,
                     sub.last_check.isoformat() if sub.last_check else None,
                     sub.last_push.isoformat() if sub.last_push else None,
+                    sub.last_pub_date.isoformat() if sub.last_pub_date else None,
                     sub.stats.total_checks,
                     sub.stats.success_checks,
                     sub.stats.total_pushes,

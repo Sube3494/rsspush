@@ -100,7 +100,7 @@ class RSSPushPlugin(star.Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("rss target")
     async def rss_target(
-        self, event: AstrMessageEvent, action: str = "", sub_id_or_name: str = ""
+        self, event: AstrMessageEvent, action: str = "", sub_id_or_name: str = "", remote_target_id: str = ""
     ):
         """管理订阅的推送目标
 
@@ -124,12 +124,25 @@ class RSSPushPlugin(star.Star):
             )
             return
 
-        # 当前会话作为推送目标
-        target = Target(
-            type="group" if not event.is_private_chat() else "private",
-            platform=event.get_platform_name(),
-            id=event.unified_msg_origin,
-        )
+        if remote_target_id:
+            # 远程管理模式：人工构造 Target 对象
+            parts = remote_target_id.split(":")
+            target = Target(
+                type="group" if len(parts) > 1 and "Group" in parts[1] else "private",
+                platform=parts[0] if len(parts) > 0 else "unknown",
+                id=remote_target_id,
+            )
+            is_remote = True
+        else:
+            # 当前会话模式
+            target = Target(
+                type="group" if not event.is_private_chat() else "private",
+                platform=event.get_platform_name(),
+                id=event.unified_msg_origin,
+            )
+            is_remote = False
+        
+        target_name_desc = f"目标({target.id if is_remote else '当前会话'})"
 
         if action == "add":
             if not sub_id_or_name:
@@ -142,7 +155,7 @@ class RSSPushPlugin(star.Star):
                 for sub in self.sub_manager.list_all():
                     if self.sub_manager.add_target(sub.id, target):
                         count += 1
-                yield event.plain_result(f"✅ 已将当前会话添加到 {count} 个订阅")
+                yield event.plain_result(f"✅ 已将 {target_name_desc} 添加到 {count} 个订阅")
             else:
                 # 添加到指定订阅
                 sub = self.sub_manager.get(
@@ -153,10 +166,10 @@ class RSSPushPlugin(star.Star):
                     return
 
                 if self.sub_manager.add_target(sub.id, target):
-                    yield event.plain_result(f"✅ 已将当前会话添加到订阅: {sub.name}")
+                    yield event.plain_result(f"✅ 已将 {target_name_desc} 添加到订阅: {sub.name}")
                 else:
                     yield event.plain_result(
-                        f"ℹ️ 当前会话已经是订阅 {sub.name} 的推送目标"
+                        f"ℹ️ {target_name_desc} 已经是订阅 {sub.name} 的推送目标"
                     )
 
         elif action == "remove":
@@ -171,9 +184,9 @@ class RSSPushPlugin(star.Star):
                     if self.sub_manager.remove_target(sub.id, target.id):
                         count += 1
                 if count > 0:
-                    yield event.plain_result(f"✅ 已从 {count} 个订阅中移除当前会话")
+                    yield event.plain_result(f"✅ 已从 {count} 个订阅中移除 {target_name_desc}")
                 else:
-                    yield event.plain_result("ℹ️ 当前会话不是任何订阅的推送目标")
+                    yield event.plain_result(f"ℹ️ {target_name_desc} 不是任何订阅的推送目标")
             else:
                 # 从指定订阅移除
                 sub = self.sub_manager.get(
@@ -184,10 +197,10 @@ class RSSPushPlugin(star.Star):
                     return
 
                 if self.sub_manager.remove_target(sub.id, target.id):
-                    yield event.plain_result(f"✅ 已从订阅 {sub.name} 移除当前会话")
+                    yield event.plain_result(f"✅ 已从订阅 {sub.name} 移除 {target_name_desc}")
                 else:
                     yield event.plain_result(
-                        f"ℹ️ 当前会话不是订阅 {sub.name} 的推送目标"
+                        f"ℹ️ {target_name_desc} 不是订阅 {sub.name} 的推送目标"
                     )
 
         elif action == "list":
@@ -214,6 +227,27 @@ class RSSPushPlugin(star.Star):
             yield event.plain_result(msg)
         else:
             yield event.plain_result(f"❌ 未知操作: {action}\n\n使用 /rss target 查看帮助")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("rss sub")
+    async def rss_sub(self, event: AstrMessageEvent, sub_id_or_name: str = "", remote_target_id: str = ""):
+        """快捷订阅命令 (支持远程 ID)"""
+        async for res in self.rss_target(event, "add", sub_id_or_name, remote_target_id):
+            yield res
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("rss unsub")
+    async def rss_unsub(self, event: AstrMessageEvent, sub_id_or_name: str = "", remote_target_id: str = ""):
+        """快捷退订命令 (支持远程 ID)"""
+        async for res in self.rss_target(event, "remove", sub_id_or_name, remote_target_id):
+            yield res
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("rss targets")
+    async def rss_targets(self, event: AstrMessageEvent, sub_id_or_name: str = ""):
+        """快捷查看目标命令"""
+        async for res in self.rss_target(event, "list", sub_id_or_name):
+            yield res
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("rss add")

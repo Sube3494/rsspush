@@ -52,7 +52,14 @@ class RSSScheduler:
                 
                 start_local = time.time()
                 async with self.fetcher.session.head(url, timeout=5) as resp:
-                    date_str = resp.headers.get("Date")
+                    # 获取 Date 响应头以同步网络时间
+                    headers = resp.headers
+                    date_str = None
+                    if hasattr(headers, "get"):
+                        date_str = headers.get("Date")
+                    elif "Date" in headers:
+                        date_str = headers["Date"]
+                        
                     if date_str:
                         # 假设请求耗时一半作为网络时间点
                         rtt = time.time() - start_local
@@ -198,7 +205,8 @@ class RSSScheduler:
                 for entry in valid_entries:
                     if entry["pubDate"] > baseline:
                         # 虽然时间已经比基准晚，但多加一层 GUID 校验以防万一（处理重复时间戳）
-                        if not self.storage.is_pushed(entry.get("guid"), sub.id):
+                        guid = entry.get("guid")
+                        if guid and not self.storage.is_pushed(str(guid), sub.id):
                             to_push.append(entry)
                 
                 logger.info(f"增量更新: 发现 {len(to_push)} 条新动态 (基准: {baseline})")

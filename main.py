@@ -18,7 +18,7 @@ from .core.subscription_manager import SubscriptionManager
 class RSSPushPlugin(star.Star):
     """RSS推送插件主类"""
 
-    def __init__(self, context: Context):
+    def __init__(self, context: Context, **kwargs):
         super().__init__(context)
 
         # 数据目录

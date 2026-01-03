@@ -23,49 +23,31 @@ class Storage:
 
     def _init_db(self):
         """初始化SQLite数据库"""
+        import os
+        
+        # 预检查权限 (由于是 Linux 环境，目录权限至关重要)
+        if self.db_file.exists() and not os.access(self.db_file, os.W_OK):
+            logger.error(f"❌ 数据库文件无写入权限: {self.db_file}")
+        if not os.access(self.data_dir, os.W_OK):
+            logger.error(f"❌ 数据目录无写入权限: {self.data_dir}。SQLite 迁移需要目录写入权限来创建临时文件。")
+
         conn = sqlite3.connect(str(self.db_file))
         cursor = conn.cursor()
         
-        # 1. 创建推送记录表 (GUID查重库)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS pushed_items (
-                guid TEXT,
-                subscription_id TEXT,
-                pub_date TIMESTAMP,
-                PRIMARY KEY (guid, subscription_id)
-            )
-        """)
-        
-        # 2. 创建订阅配置表 (核心配置)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS subscriptions (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                url TEXT NOT NULL,
-                enabled INTEGER DEFAULT 1,
-                last_pub_date TIMESTAMP,
-                last_error TEXT,
-                template TEXT,
-                filters TEXT,
-                max_items INTEGER DEFAULT 1
-            )
-        """)
-
-        # 3. 彻底清理冗余列 (减脂手术：移除所有统计计数器、创建时间、活动时间等)
-        cursor.execute("PRAGMA table_info(subscriptions)")
-        current_columns = {col[1] for col in cursor.fetchall()}
-        # 定义核心列名，其他一律视为冗余
-        core_cols = {'id', 'name', 'url', 'enabled', 'last_pub_date', 'last_error', 'template', 'filters', 'max_items'}
-        
-        if not all(col in current_columns for col in core_cols) or len(current_columns) > len(core_cols):
-            logger.info("检测到数据库存在冗余统计项或缺少核心列，正在执行“深度减脂”迁移...")
-            
-            # 安全重命名原表
-            cursor.execute("ALTER TABLE subscriptions RENAME TO subs_old")
-            
-            # 创建纯净的新表
+        try:
+            # 1. 创建推送记录表 (GUID查重库)
             cursor.execute("""
-                CREATE TABLE subscriptions (
+                CREATE TABLE IF NOT EXISTS pushed_items (
+                    guid TEXT,
+                    subscription_id TEXT,
+                    pub_date TIMESTAMP,
+                    PRIMARY KEY (guid, subscription_id)
+                )
+            """)
+            
+            # 2. 创建订阅配置表 (核心配置)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS subscriptions (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
                     url TEXT NOT NULL,
@@ -77,50 +59,93 @@ class Storage:
                     max_items INTEGER DEFAULT 1
                 )
             """)
-            
-            # 迁移核心数据
-            migrate_cols = []
-            for col in core_cols:
-                if col in current_columns:
-                    migrate_cols.append(col)
-            
-            cols_str = ", ".join(migrate_cols)
-            cursor.execute(f"INSERT INTO subscriptions ({cols_str}) SELECT {cols_str} FROM subs_old")
-            
-            # 删除遗失属性的旧表
-            cursor.execute("DROP TABLE subs_old")
-            logger.info("数据库 subscriptions 表深度清理完成")
 
-        # 4. 初始化推送目标表
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS targets (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                subscription_id TEXT NOT NULL,
-                type TEXT NOT NULL,
-                platform TEXT NOT NULL,
-                target_id TEXT NOT NULL,
-                FOREIGN KEY (subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE
-            )
-        """)
-        
-        # 5. 清理 pushed_items 的冗余列 (targets) -> 已经在之前的外科手术处理过了，这里保持纯净
-        cursor.execute("PRAGMA table_info(pushed_items)")
-        pushed_columns = {col[1] for col in cursor.fetchall()}
-        if 'targets' in pushed_columns:
-            logger.info("清理 pushed_items 冗余列...")
-            cursor.execute("ALTER TABLE pushed_items RENAME TO pushed_old")
+            # 3. 彻底清理冗余列 (减脂手术：移除所有统计计数器、创建时间、活动时间等)
+            cursor.execute("PRAGMA table_info(subscriptions)")
+            current_columns = {col[1] for col in cursor.fetchall()}
+            core_cols = {'id', 'name', 'url', 'enabled', 'last_pub_date', 'last_error', 'template', 'filters', 'max_items'}
+            
+            if not all(col in current_columns for col in core_cols) or len(current_columns) > len(core_cols):
+                logger.info("检测到数据库存在冗余统计项或缺少核心列，正在执行“深度减脂”迁移...")
+                
+                # 开启事务
+                cursor.execute("BEGIN TRANSACTION")
+                try:
+                    # 安全重命名原表
+                    cursor.execute("ALTER TABLE subscriptions RENAME TO subs_old")
+                    
+                    # 创建纯净的新表
+                    cursor.execute("""
+                        CREATE TABLE subscriptions (
+                            id TEXT PRIMARY KEY,
+                            name TEXT NOT NULL,
+                            url TEXT NOT NULL,
+                            enabled INTEGER DEFAULT 1,
+                            last_pub_date TIMESTAMP,
+                            last_error TEXT,
+                            template TEXT,
+                            filters TEXT,
+                            max_items INTEGER DEFAULT 1
+                        )
+                    """)
+                    
+                    # 迁移核心数据
+                    migrate_cols = [col for col in core_cols if col in current_columns]
+                    cols_str = ", ".join(migrate_cols)
+                    cursor.execute(f"INSERT INTO subscriptions ({cols_str}) SELECT {cols_str} FROM subs_old")
+                    
+                    # 删除旧表
+                    cursor.execute("DROP TABLE subs_old")
+                    conn.commit()
+                    logger.info("数据库 subscriptions 表深度清理完成")
+                except Exception as e:
+                    conn.rollback()
+                    logger.error(f"迁移 subscriptions 失败: {e}")
+                    raise
+
+            # 4. 初始化推送目标表
             cursor.execute("""
-                CREATE TABLE pushed_items (
-                    guid TEXT,
-                    subscription_id TEXT,
-                    pub_date TIMESTAMP,
-                    PRIMARY KEY (guid, subscription_id)
+                CREATE TABLE IF NOT EXISTS targets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    subscription_id TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    platform TEXT NOT NULL,
+                    target_id TEXT NOT NULL,
+                    FOREIGN KEY (subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE
                 )
             """)
-            cursor.execute("INSERT INTO pushed_items SELECT guid, subscription_id, pub_date FROM pushed_old")
-            cursor.execute("DROP TABLE pushed_old")
+            
+            # 5. 清理 pushed_items 的冗余列 (targets)
+            cursor.execute("PRAGMA table_info(pushed_items)")
+            pushed_columns = {col[1] for col in cursor.fetchall()}
+            if 'targets' in pushed_columns:
+                logger.info("清理 pushed_items 冗余列...")
+                cursor.execute("BEGIN TRANSACTION")
+                try:
+                    cursor.execute("ALTER TABLE pushed_items RENAME TO pushed_old")
+                    cursor.execute("""
+                        CREATE TABLE pushed_items (
+                            guid TEXT,
+                            subscription_id TEXT,
+                            pub_date TIMESTAMP,
+                            PRIMARY KEY (guid, subscription_id)
+                        )
+                    """)
+                    cursor.execute("INSERT INTO pushed_items SELECT guid, subscription_id, pub_date FROM pushed_old")
+                    cursor.execute("DROP TABLE pushed_old")
+                    conn.commit()
+                except Exception as e:
+                    conn.rollback()
+                    logger.error(f"清理 pushed_items 失败: {e}")
+                    raise
 
-        conn.commit()
+            conn.commit()
+        except sqlite3.OperationalError as e:
+            if "readonly" in str(e).lower():
+                logger.error(f"❌ 数据库由于权限问题无法写入。请检查 {self.data_dir} 及其文件的权限。")
+            raise e
+        finally:
+            conn.close()
 
         # 6. JSON 迁移 (保留基本的兼容性逻辑)
         if self.subs_file.exists():

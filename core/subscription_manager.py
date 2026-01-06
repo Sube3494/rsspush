@@ -199,7 +199,7 @@ class SubscriptionManager:
 
         Args:
             sub_id: 订阅ID
-            target_id: 目标ID
+            target_id: 目标ID（支持完整ID或后缀匹配，如 12345678）
 
         Returns:
             是否操作成功
@@ -207,9 +207,20 @@ class SubscriptionManager:
         sub = self.get(sub_id)
         if sub:
             original_len = len(sub.targets)
+            
+            # 1. 尝试精确匹配
             sub.targets = [t for t in sub.targets if t.id != target_id]
             if len(sub.targets) < original_len:
                 self.save()
-                logger.info(f"从订阅 {sub.name} 移除推送目标")
+                logger.info(f"从订阅 {sub.name} 移除推送目标 (精确匹配: {target_id})")
+                return True
+            
+            # 2. 尝试后缀匹配（针对统一 ID，如 platform:type:id）
+            # 匹配 :target_id 结尾的目标
+            suffix = ":" + target_id
+            sub.targets = [t for t in sub.targets if not t.id.endswith(suffix)]
+            if len(sub.targets) < original_len:
+                self.save()
+                logger.info(f"从订阅 {sub.name} 移除推送目标 (后缀匹配: {target_id})")
                 return True
         return False
